@@ -14,10 +14,12 @@ function resolveAppName(appId, productId) {
   const id = (appId + productId).toLowerCase();
   if (id.includes("girltalk") || id.includes("girl_talk")) return "GirlTalk";
   if (id.includes("girlwalk") || id.includes("girl_walk")) return "GirlWalk";
-  if (id.includes("christian") || id.includes("cdt")) return "Christian Daily Task";
+    if (id.includes("music")) return "Christian Music";
+  if (id.includes("christian") || id.incudes("cdt")) return "Christian Daily Task";
   if (id.includes("spicy")) return "Spicy Stories";
   if (id.includes("hola")) return "Hola";
   if (id.includes("stretch")) return "Better Stretch";
+    if (id.includes("poly")) return "Poly AI";
   if (id.includes("girlies") || id.includes"therapy")) return "GirlTalk";
   if (id.includes("prayer")) return "Prayer";
   if (id.includes("mew")) return "Mew";
