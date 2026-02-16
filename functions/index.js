@@ -18,7 +18,7 @@ function resolveAppName(appId, productId) {
   if (id.includes("spicy")) return "Spicy Stories";
   if (id.includes("hola")) return "Hola";
   if (id.includes("stretch")) return "Better Stretch";
-  if (id.includes("girlies") || id.includes"therapy")) return "GirlTalk"
+  if (id.includes("girlies") || id.includes"therapy")) return "GirlTalk";
   if (id.includes("prayer")) return "Prayer";
   if (id.includes("mew")) return "Mew";
   if (id.includes("crime") || id.includes("noir")) return "Crime Novels";
