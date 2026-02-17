@@ -7,7 +7,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
-    .header { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+    .header { background: #1a1a1a; border-bottom: 1px soid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
     .header h1 { font-size: 20px; font-weight: 600; color: #fff; }
     .header .stats { font-size: 13px; color: #888; }
     .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 12px 24px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -83,6 +83,9 @@
       if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
       if (diff < 604800) return Math.floor(diff / 86400) + "d ago";
       return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    }
+    function formatExactTime(date) {
+      return date.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
     }
     function formatCurrency(price, currency) {
       try { return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD", minimumFractionDigits: 2 }).format(price); }
