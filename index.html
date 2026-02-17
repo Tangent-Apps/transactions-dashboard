@@ -102,7 +102,7 @@
       const label = labels[type] || type;
       const ts = tx.received_at?.toDate ? tx.received_at.toDate() : new Date(tx.event_timestamp_ms || Date.now());
       const flag = countryToFlag(tx.country_code);
-      return '<div class="tx-card"><div class="tx-left"><div class="tx-icon ' + type + '">' + icon + '</div><div class="tx-info"><h3>' + (tx.app_name || "Unknown") + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + timeAgo(ts) + '</div></div></div>';
+      return '<div class="tx-card"><div class="tx-left"><div class="tx-icon ' + type + '">' + icon + '</div><div class="tx-info"><h3>' + (tx.app_name || "Unknown") + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + formatExactTime(ts) + ' \u00b7 ' + timeAgo(ts) + '</div></div></div>';
     }
     function renderAll() {
       const container = document.getElementById("container");
