@@ -8,12 +8,32 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
     .header { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
-    .header h1 { font-size: 20px; font-weight: 600; color: #fff; }
-    .header .stats { font-size: 13px; color: #888; }
-    .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 12px 24px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .header h1 { font-size: 18px; font-weight: 600; color: #fff; }
+
+    /* Stats bar — ChartMogul style */
+    .stats-bar { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; gap: 40px; }
+    .stat-item { display: flex; flex-direction: column; gap: 3px; }
+    .stat-value { font-size: 28px; font-weight: 700; color: #fff; line-height: 1; letter-spacing: -0.5px; }
+    .stat-delta { font-size: 12px; font-weight: 500; }
+    .stat-delta.up { color: #4ade80; }
+    .stat-delta.down { color: #f87171; }
+    .stat-delta.neutral { color: #555; }
+    .stat-label { font-size: 11px; color: #555; }
+
+    /* Filters */
+    .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 10px 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .filters-left { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .filter-btn { padding: 6px 14px; border-radius: 20px; border: 1px solid #333; background: transparent; color: #aaa; font-size: 13px; cursor: pointer; transition: all 0.15s; }
     .filter-btn:hover { border-color: #555; color: #ddd; }
     .filter-btn.active { background: #fff; color: #000; border-color: #fff; font-weight: 500; }
+
+    /* Live / History toggle */
+    .view-toggle { display: flex; background: #111; border: 1px solid #2a2a2a; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+    .toggle-btn { padding: 6px 14px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: transparent; color: #555; transition: all 0.2s; white-space: nowrap; }
+    .toggle-btn.live-active { background: #1a2e1a; color: #4ade80; }
+    .toggle-btn.history-active { background: #1e1e2e; color: #818cf8; }
+
+    /* Cards */
     .container { max-width: 900px; margin: 0 auto; padding: 16px; }
     .tx-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px 18px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; transition: background 0.15s; }
     .tx-card:hover { background: #222; }
@@ -43,11 +63,31 @@
 <body>
   <div class="header">
     <h1><span class="live-dot"></span> Transactions Dashboard</h1>
-    <div class="stats" id="stats">Loading...</div>
   </div>
-  <div class="filters" id="filters">
-    <button class="filter-btn active" data-app="all">All Apps</button>
+
+  <div class="stats-bar">
+    <div class="stat-item">
+      <div class="stat-value" id="statRevValue">—</div>
+      <div class="stat-delta neutral" id="statRevDelta">— vs yesterday</div>
+      <div class="stat-label">Today's revenue</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value" id="statCountValue">—</div>
+      <div class="stat-delta neutral" id="statCountDelta">— vs yesterday</div>
+      <div class="stat-label">Conversions today</div>
+    </div>
   </div>
+
+  <div class="filters">
+    <div class="filters-left" id="filters">
+      <button class="filter-btn active" data-app="all">All Apps</button>
+    </div>
+    <div class="view-toggle">
+      <button class="toggle-btn live-active" id="toggleLive" onclick="setViewMode('live')">● Live</button>
+      <button class="toggle-btn" id="toggleHistory" onclick="setViewMode('history')">History</button>
+    </div>
+  </div>
+
   <div class="container" id="container">
     <div class="loading">Loading transactions...</div>
   </div>
@@ -66,12 +106,23 @@
     };
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
+
+    const SNAPSHOT_SIZE = 100; // load enough to cover today + yesterday for delta
     const PAGE_SIZE = 30;
     let lastDoc = null;
     let currentApp = "all";
+    let viewMode = "live";
     let allTxs = [];
     let knownApps = new Set();
     let unsubscribe = null;
+
+    window.setViewMode = function(mode) {
+      viewMode = mode;
+      document.getElementById("toggleLive").className = "toggle-btn" + (mode === "live" ? " live-active" : "");
+      document.getElementById("toggleHistory").className = "toggle-btn" + (mode === "history" ? " history-active" : "");
+      renderAll();
+    };
+
     const appIcons = {
       "GirlTalk": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ee/4b/ed/ee4bed9a-e8fa-26fe-5e3e-d27499ccee2e/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
       "GirlWalk": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/9d/4b/4a/9d4b4a51-f774-99f3-0709-a5738b888667/AppIcon-0-0-1x_U007emarketing-0-8-0-0-85-220.png/100x100bb.jpg",
@@ -88,7 +139,9 @@
       "Reel Short Stories": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/19/32/a8/1932a840-902d-4337-cda8-b102c558c66c/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
       "Girls Therapy": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/78/cf/84/78cf845e-28ba-f41b-1261-8b85332373c0/AppIcon-0-0-1x_U007emarketing-0-11-0-0-85-220.png/100x100bb.jpg"
     };
+
     const labels = { new_subscription: "Direct Subscription", trial_to_paid: "Trial \u2192 Paid", one_time_purchase: "One-Time Purchase" };
+
     function timeAgo(date) {
       const now = new Date(); const diff = (now - date) / 1000;
       if (diff < 60) return Math.floor(diff) + "s ago";
@@ -109,10 +162,14 @@
       const codePoints = code.toUpperCase().split("").map(c => 127397 + c.charCodeAt(0));
       return String.fromCodePoint(...codePoints);
     }
+    function getTxDate(tx) {
+      return tx.received_at?.toDate ? tx.received_at.toDate() : new Date(tx.event_timestamp_ms || 0);
+    }
+
     function renderTx(tx) {
       const type = tx.transaction_type || "unknown";
       const label = labels[type] || type;
-      const ts = tx.received_at?.toDate ? tx.received_at.toDate() : new Date(tx.event_timestamp_ms || Date.now());
+      const ts = getTxDate(tx);
       const flag = countryToFlag(tx.country_code);
       const appName = tx.app_name || "Unknown";
       const iconUrl = appIcons[appName];
@@ -121,37 +178,94 @@
         : appName.charAt(0);
       return '<div class="tx-card"><div class="tx-left"><div class="tx-icon">' + iconHtml + '</div><div class="tx-info"><h3>' + appName + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + formatExactTime(ts) + ' \u00b7 ' + timeAgo(ts) + '</div></div></div>';
     }
+
+    function getFilteredTxs() {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      let txs = currentApp === "all" ? allTxs : allTxs.filter(t => t.app_name === currentApp);
+      if (viewMode === "live") txs = txs.filter(t => getTxDate(t) >= today);
+      return txs;
+    }
+
     function renderAll() {
       const container = document.getElementById("container");
-      const filtered = currentApp === "all" ? allTxs : allTxs.filter(t => t.app_name === currentApp);
-      if (filtered.length === 0) { container.innerHTML = '<div class="empty-state"><h2>No transactions yet</h2><p>Transactions will appear here as they come in from RevenueCat.</p></div>'; return; }
+      const filtered = getFilteredTxs();
+      if (filtered.length === 0) {
+        const msg = viewMode === "live"
+          ? '<div class="empty-state"><h2>No transactions today</h2><p>Switch to History to see past transactions.</p></div>'
+          : '<div class="empty-state"><h2>No transactions yet</h2><p>Transactions will appear here as they come in from RevenueCat.</p></div>';
+        container.innerHTML = msg;
+        return;
+      }
       container.innerHTML = filtered.map(renderTx).join("");
-      if (lastDoc && filtered.length >= PAGE_SIZE) { container.innerHTML += '<button class="show-more" id="loadMore">Show more</button>'; document.getElementById("loadMore").addEventListener("click", loadMore); }
+      if (viewMode === "history" && lastDoc && allTxs.length >= PAGE_SIZE) {
+        container.innerHTML += '<button class="show-more" id="loadMore">Show more</button>';
+        document.getElementById("loadMore").addEventListener("click", loadMore);
+      }
     }
+
     function updateStats() {
       const today = new Date(); today.setHours(0, 0, 0, 0);
-      const todayTxs = allTxs.filter(t => { const ts = t.received_at?.toDate ? t.received_at.toDate() : new Date(t.event_timestamp_ms || 0); return ts >= today; });
-      const todayRevenue = todayTxs.reduce((sum, t) => sum + (t.price || 0), 0);
-      document.getElementById("stats").innerHTML = "Today: " + todayTxs.length + " transactions \u00b7 " + formatCurrency(todayRevenue, "USD");
+      const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+      const src = currentApp === "all" ? allTxs : allTxs.filter(t => t.app_name === currentApp);
+      const todayTxs = src.filter(t => getTxDate(t) >= today);
+      const ydayTxs = src.filter(t => { const d = getTxDate(t); return d >= yesterday && d < today; });
+      const todayRev = todayTxs.reduce((s, t) => s + (t.price || 0), 0);
+      const ydayRev = ydayTxs.reduce((s, t) => s + (t.price || 0), 0);
+      const todayCount = todayTxs.length;
+      const ydayCount = ydayTxs.length;
+
+      document.getElementById("statRevValue").textContent = formatCurrency(todayRev, "USD");
+      if (ydayRev > 0) {
+        const pct = Math.round(((todayRev - ydayRev) / ydayRev) * 100);
+        const up = pct >= 0;
+        document.getElementById("statRevDelta").className = "stat-delta " + (up ? "up" : "down");
+        document.getElementById("statRevDelta").textContent = (up ? "\u2191 +" : "\u2193 -") + Math.abs(pct) + "% vs yesterday";
+      } else if (todayRev > 0) {
+        document.getElementById("statRevDelta").className = "stat-delta up";
+        document.getElementById("statRevDelta").textContent = "\u2191 first today";
+      } else {
+        document.getElementById("statRevDelta").className = "stat-delta neutral";
+        document.getElementById("statRevDelta").textContent = "no data yet";
+      }
+
+      document.getElementById("statCountValue").textContent = todayCount;
+      if (ydayCount > 0) {
+        const diff = todayCount - ydayCount;
+        const up = diff >= 0;
+        document.getElementById("statCountDelta").className = "stat-delta " + (up ? "up" : "down");
+        document.getElementById("statCountDelta").textContent = (up ? "\u2191 +" : "\u2193 ") + diff + " vs yesterday";
+      } else if (todayCount > 0) {
+        document.getElementById("statCountDelta").className = "stat-delta up";
+        document.getElementById("statCountDelta").textContent = "\u2191 first today";
+      } else {
+        document.getElementById("statCountDelta").className = "stat-delta neutral";
+        document.getElementById("statCountDelta").textContent = "no data yet";
+      }
     }
+
     function updateFilters() {
       allTxs.forEach(t => { if (t.app_name) knownApps.add(t.app_name); });
       const filtersEl = document.getElementById("filters");
       const apps = Array.from(knownApps).sort();
-      filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All Apps</button>' + apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
-      filtersEl.querySelectorAll(".filter-btn").forEach(btn => { btn.addEventListener("click", () => { currentApp = btn.dataset.app; renderAll(); updateFilters(); }); });
+      filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All Apps</button>' +
+        apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
+      filtersEl.querySelectorAll(".filter-btn").forEach(btn => {
+        btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateStats(); updateFilters(); renderAll(); });
+      });
     }
+
     async function loadMore() {
       if (!lastDoc) return;
-      let q = query(collection(db, "transactions"), orderBy("received_at", "desc"), startAfter(lastDoc), limit(PAGE_SIZE));
+      const q = query(collection(db, "transactions"), orderBy("received_at", "desc"), startAfter(lastDoc), limit(PAGE_SIZE));
       const snap = await getDocs(q);
       if (snap.empty) { lastDoc = null; renderAll(); return; }
       snap.forEach(doc => allTxs.push(doc.data()));
       lastDoc = snap.docs[snap.docs.length - 1];
       updateStats(); updateFilters(); renderAll();
     }
+
     function startListening() {
-      const q = query(collection(db, "transactions"), orderBy("received_at", "desc"), limit(PAGE_SIZE));
+      const q = query(collection(db, "transactions"), orderBy("received_at", "desc"), limit(SNAPSHOT_SIZE));
       unsubscribe = onSnapshot(q, (snapshot) => {
         allTxs = [];
         snapshot.forEach(doc => allTxs.push(doc.data()));
@@ -162,6 +276,7 @@
         document.getElementById("container").innerHTML = '<div class="empty-state"><h2>Connection error</h2><p>' + err.message + '</p></div>';
       });
     }
+
     startListening();
   </script>
 </body>
