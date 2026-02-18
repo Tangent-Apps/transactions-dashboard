@@ -43,8 +43,8 @@
     /* Day group headers */
     .day-header { display: flex; align-items: baseline; justify-content: space-between; padding: 20px 0 8px; }
     .day-header:first-child { padding-top: 4px; }
-    .day-label { font-size: 13px; font-weight: 600; color: #ccc; }
-    .day-summary { font-size: 12px; color: #555; }
+    .day-label { font-size: 13px; font-weight: 600; color: #aaa; }
+    .day-summary { font-size: 13px; font-weight: 600; color: #fff; }
 
     .show-more { display: block; width: 100%; padding: 14px; margin: 16px 0; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; color: #aaa; font-size: 14px; cursor: pointer; transition: all 0.15s; }
     .show-more:hover { background: #222; color: #fff; }
@@ -158,6 +158,11 @@
       if (ts === yesterday.getTime()) return "Yesterday";
       return new Date(ts).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
     }
+    function renderDayHeader(label, txs) {
+      const rev = txs.reduce((s, t) => s + (t.price || 0), 0);
+      const count = txs.length + " conversion" + (txs.length !== 1 ? "s" : "");
+      return '<div class="day-header"><span class="day-label">' + label + '</span><span class="day-summary">' + formatCurrency(rev, "USD") + ' \u00b7 ' + count + '</span></div>';
+    }
 
     function renderTx(tx) {
       const type = tx.transaction_type || "unknown";
@@ -192,7 +197,6 @@
       }
 
       if (viewMode === "history") {
-        // Group by day
         const groups = {};
         const groupOrder = [];
         filtered.forEach(tx => {
@@ -202,11 +206,8 @@
         });
         let html = "";
         groupOrder.forEach(key => {
-          const dayTxs = groups[key];
-          const dayRev = dayTxs.reduce((s, t) => s + (t.price || 0), 0);
-          const countLabel = dayTxs.length + " conversion" + (dayTxs.length !== 1 ? "s" : "");
-          html += '<div class="day-header"><span class="day-label">' + getDayLabel(key) + '</span><span class="day-summary">' + formatCurrency(dayRev, "USD") + ' \u00b7 ' + countLabel + '</span></div>';
-          html += dayTxs.map(renderTx).join("");
+          html += renderDayHeader(getDayLabel(key), groups[key]);
+          html += groups[key].map(renderTx).join("");
         });
         if (lastDoc && allTxs.length >= PAGE_SIZE) {
           html += '<button class="show-more" id="loadMore">Show more</button>';
@@ -215,7 +216,10 @@
         const btn = document.getElementById("loadMore");
         if (btn) btn.addEventListener("click", loadMore);
       } else {
-        container.innerHTML = filtered.map(renderTx).join("");
+        // Live mode: show "Today" header with running total, then cards
+        let html = renderDayHeader("Today", filtered);
+        html += filtered.map(renderTx).join("");
+        container.innerHTML = html;
       }
     }
 
