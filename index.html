@@ -10,18 +10,8 @@
     .header { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
     .header h1 { font-size: 18px; font-weight: 600; color: #fff; }
 
-    /* Stats bar — ChartMogul style */
-    .stats-bar { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; gap: 40px; }
-    .stat-item { display: flex; flex-direction: column; gap: 3px; }
-    .stat-value { font-size: 28px; font-weight: 700; color: #fff; line-height: 1; letter-spacing: -0.5px; }
-    .stat-delta { font-size: 12px; font-weight: 500; }
-    .stat-delta.up { color: #4ade80; }
-    .stat-delta.down { color: #f87171; }
-    .stat-delta.neutral { color: #555; }
-    .stat-label { font-size: 11px; color: #555; }
-
     /* Filters */
-    .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 10px 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 10px 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; position: sticky; top: 57px; z-index: 9; }
     .filters-left { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .filter-btn { padding: 6px 14px; border-radius: 20px; border: 1px solid #333; background: transparent; color: #aaa; font-size: 13px; cursor: pointer; transition: all 0.15s; }
     .filter-btn:hover { border-color: #555; color: #ddd; }
@@ -49,6 +39,13 @@
     .badge.new_subscription { background: #1a3a2a; color: #4ade80; }
     .badge.trial_to_paid { background: #1a2a3a; color: #60a5fa; }
     .badge.one_time_purchase { background: #3a2a1a; color: #fbbf24; }
+
+    /* Day group headers */
+    .day-header { display: flex; align-items: baseline; justify-content: space-between; padding: 20px 0 8px; }
+    .day-header:first-child { padding-top: 4px; }
+    .day-label { font-size: 13px; font-weight: 600; color: #ccc; }
+    .day-summary { font-size: 12px; color: #555; }
+
     .show-more { display: block; width: 100%; padding: 14px; margin: 16px 0; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; color: #aaa; font-size: 14px; cursor: pointer; transition: all 0.15s; }
     .show-more:hover { background: #222; color: #fff; }
     .empty-state { text-align: center; padding: 80px 20px; color: #555; }
@@ -63,19 +60,6 @@
 <body>
   <div class="header">
     <h1><span class="live-dot"></span> Transactions Dashboard</h1>
-  </div>
-
-  <div class="stats-bar">
-    <div class="stat-item">
-      <div class="stat-value" id="statRevValue">—</div>
-      <div class="stat-delta neutral" id="statRevDelta">— vs yesterday</div>
-      <div class="stat-label">Today's revenue</div>
-    </div>
-    <div class="stat-item">
-      <div class="stat-value" id="statCountValue">—</div>
-      <div class="stat-delta neutral" id="statCountDelta">— vs yesterday</div>
-      <div class="stat-label">Conversions today</div>
-    </div>
   </div>
 
   <div class="filters">
@@ -107,14 +91,13 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    const SNAPSHOT_SIZE = 100; // load enough to cover today + yesterday for delta
+    const SNAPSHOT_SIZE = 100;
     const PAGE_SIZE = 30;
     let lastDoc = null;
     let currentApp = "all";
     let viewMode = "live";
     let allTxs = [];
     let knownApps = new Set();
-    let unsubscribe = null;
 
     window.setViewMode = function(mode) {
       viewMode = mode;
@@ -165,6 +148,16 @@
     function getTxDate(tx) {
       return tx.received_at?.toDate ? tx.received_at.toDate() : new Date(tx.event_timestamp_ms || 0);
     }
+    function getDayKey(date) {
+      const d = new Date(date); d.setHours(0, 0, 0, 0); return d.getTime();
+    }
+    function getDayLabel(ts) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+      if (ts === today.getTime()) return "Today";
+      if (ts === yesterday.getTime()) return "Yesterday";
+      return new Date(ts).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+    }
 
     function renderTx(tx) {
       const type = tx.transaction_type || "unknown";
@@ -189,6 +182,7 @@
     function renderAll() {
       const container = document.getElementById("container");
       const filtered = getFilteredTxs();
+
       if (filtered.length === 0) {
         const msg = viewMode === "live"
           ? '<div class="empty-state"><h2>No transactions today</h2><p>Switch to History to see past transactions.</p></div>'
@@ -196,50 +190,32 @@
         container.innerHTML = msg;
         return;
       }
-      container.innerHTML = filtered.map(renderTx).join("");
-      if (viewMode === "history" && lastDoc && allTxs.length >= PAGE_SIZE) {
-        container.innerHTML += '<button class="show-more" id="loadMore">Show more</button>';
-        document.getElementById("loadMore").addEventListener("click", loadMore);
-      }
-    }
 
-    function updateStats() {
-      const today = new Date(); today.setHours(0, 0, 0, 0);
-      const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-      const src = currentApp === "all" ? allTxs : allTxs.filter(t => t.app_name === currentApp);
-      const todayTxs = src.filter(t => getTxDate(t) >= today);
-      const ydayTxs = src.filter(t => { const d = getTxDate(t); return d >= yesterday && d < today; });
-      const todayRev = todayTxs.reduce((s, t) => s + (t.price || 0), 0);
-      const ydayRev = ydayTxs.reduce((s, t) => s + (t.price || 0), 0);
-      const todayCount = todayTxs.length;
-      const ydayCount = ydayTxs.length;
-
-      document.getElementById("statRevValue").textContent = formatCurrency(todayRev, "USD");
-      if (ydayRev > 0) {
-        const pct = Math.round(((todayRev - ydayRev) / ydayRev) * 100);
-        const up = pct >= 0;
-        document.getElementById("statRevDelta").className = "stat-delta " + (up ? "up" : "down");
-        document.getElementById("statRevDelta").textContent = (up ? "\u2191 +" : "\u2193 -") + Math.abs(pct) + "% vs yesterday";
-      } else if (todayRev > 0) {
-        document.getElementById("statRevDelta").className = "stat-delta up";
-        document.getElementById("statRevDelta").textContent = "\u2191 first today";
+      if (viewMode === "history") {
+        // Group by day
+        const groups = {};
+        const groupOrder = [];
+        filtered.forEach(tx => {
+          const key = getDayKey(getTxDate(tx));
+          if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
+          groups[key].push(tx);
+        });
+        let html = "";
+        groupOrder.forEach(key => {
+          const dayTxs = groups[key];
+          const dayRev = dayTxs.reduce((s, t) => s + (t.price || 0), 0);
+          const countLabel = dayTxs.length + " conversion" + (dayTxs.length !== 1 ? "s" : "");
+          html += '<div class="day-header"><span class="day-label">' + getDayLabel(key) + '</span><span class="day-summary">' + formatCurrency(dayRev, "USD") + ' \u00b7 ' + countLabel + '</span></div>';
+          html += dayTxs.map(renderTx).join("");
+        });
+        if (lastDoc && allTxs.length >= PAGE_SIZE) {
+          html += '<button class="show-more" id="loadMore">Show more</button>';
+        }
+        container.innerHTML = html;
+        const btn = document.getElementById("loadMore");
+        if (btn) btn.addEventListener("click", loadMore);
       } else {
-        document.getElementById("statRevDelta").className = "stat-delta neutral";
-        document.getElementById("statRevDelta").textContent = "no data yet";
-      }
-
-      document.getElementById("statCountValue").textContent = todayCount;
-      if (ydayCount > 0) {
-        const diff = todayCount - ydayCount;
-        const up = diff >= 0;
-        document.getElementById("statCountDelta").className = "stat-delta " + (up ? "up" : "down");
-        document.getElementById("statCountDelta").textContent = (up ? "\u2191 +" : "\u2193 ") + diff + " vs yesterday";
-      } else if (todayCount > 0) {
-        document.getElementById("statCountDelta").className = "stat-delta up";
-        document.getElementById("statCountDelta").textContent = "\u2191 first today";
-      } else {
-        document.getElementById("statCountDelta").className = "stat-delta neutral";
-        document.getElementById("statCountDelta").textContent = "no data yet";
+        container.innerHTML = filtered.map(renderTx).join("");
       }
     }
 
@@ -250,7 +226,7 @@
       filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All Apps</button>' +
         apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
       filtersEl.querySelectorAll(".filter-btn").forEach(btn => {
-        btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateStats(); updateFilters(); renderAll(); });
+        btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateFilters(); renderAll(); });
       });
     }
 
@@ -261,16 +237,16 @@
       if (snap.empty) { lastDoc = null; renderAll(); return; }
       snap.forEach(doc => allTxs.push(doc.data()));
       lastDoc = snap.docs[snap.docs.length - 1];
-      updateStats(); updateFilters(); renderAll();
+      updateFilters(); renderAll();
     }
 
     function startListening() {
       const q = query(collection(db, "transactions"), orderBy("received_at", "desc"), limit(SNAPSHOT_SIZE));
-      unsubscribe = onSnapshot(q, (snapshot) => {
+      onSnapshot(q, (snapshot) => {
         allTxs = [];
         snapshot.forEach(doc => allTxs.push(doc.data()));
         lastDoc = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
-        updateStats(); updateFilters(); renderAll();
+        updateFilters(); renderAll();
       }, (err) => {
         console.error("Firestore error:", err);
         document.getElementById("container").innerHTML = '<div class="empty-state"><h2>Connection error</h2><p>' + err.message + '</p></div>';
