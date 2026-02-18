@@ -7,7 +7,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
-    .header { background: #1a1a1a; border-bottom: 1px soid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+    .header { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
     .header h1 { font-size: 20px; font-weight: 600; color: #fff; }
     .header .stats { font-size: 13px; color: #888; }
     .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 12px 24px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -18,10 +18,8 @@
     .tx-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px 18px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; transition: background 0.15s; }
     .tx-card:hover { background: #222; }
     .tx-left { display: flex; align-items: center; gap: 14px; }
-    .tx-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
-    .tx-icon.new_subscription { background: #1a3a2a; }
-    .tx-icon.trial_to_paid { background: #1a2a3a; }
-    .tx-icon.one_time_purchase { background: #3a2a1a; }
+    .tx-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; flex-shrink: 0; overflow: hidden; background: #2a2a2a; color: #aaa; }
+    .tx-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 10px; }
     .tx-info h3 { font-size: 14px; font-weight: 500; color: #fff; margin-bottom: 3px; }
     .tx-info p { font-size: 12px; color: #777; }
     .tx-right { text-align: right; }
@@ -56,7 +54,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getFirestore, collection, query, orderBy, limit, startAfter, getDocs, onSnapshot, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { getFirestore, collection, query, orderBy, limit, startAfter, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyCnfHM5rp-p1wuEMN2BPE4koLrp9WqcQ_c",
@@ -74,7 +72,22 @@
     let allTxs = [];
     let knownApps = new Set();
     let unsubscribe = null;
-    const icons = { new_subscription: "\u{1F4B3}", trial_to_paid: "\u2705", one_time_purchase: "\u{1F6D2}" };
+    const appIcons = {
+      "GirlTalk": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ee/4b/ed/ee4bed9a-e8fa-26fe-5e3e-d27499ccee2e/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
+      "GirlWalk": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/9d/4b/4a/9d4b4a51-f774-99f3-0709-a5738b888667/AppIcon-0-0-1x_U007emarketing-0-8-0-0-85-220.png/100x100bb.jpg",
+      "Christian Daily Task": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/f1/f8/a3/f1f8a327-c6ee-7e92-2660-8fd9014eb973/AppIcon-0-0-1x_U007emarketing-0-8-0-85-220.png/100x100bb.jpg",
+      "Spicy Stories": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/b9/a4/f1/b9a4f18f-f6ac-3517-36c8-d52226fadcbe/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
+      "Christian Music": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/da/7b/95/da7b952c-8a66-f93c-bdc6-9002ddd99984/AppIcon-0-0-1x_U007emarketing-0-9-0-85-220.png/100x100bb.jpg",
+      "Poly AI": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/80/5a/3b/805a3b7c-0c7e-b270-cdda-1cc8d17c500c/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
+      "Hola": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/ab/8e/01/ab8e0122-f693-96a2-5677-06a38b6e2c9b/AppIcon-0-0-1x_U007epad-0-1-0-85-220.jpeg/100x100bb.jpg",
+      "Better Stretch": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/8d/e6/90/8de69039-0ff2-2293-4ca0-4f35aab11e5c/AppIcon-0-0-1x_U007ephone-0-1-0-85-220.jpeg/100x100bb.jpg",
+      "Murder Mystery": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/a7/da/4e/a7da4e20-af84-395e-ad5e-00b75c214106/AppIcon-0-0-1x_U007ephone-0-1-0-85-220.png/100x100bb.jpg",
+      "Crime Novels": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ea/ec/30/eaec30fe-9e26-0179-1f70-61c6f57e34e2/AppIcon-1x_U007epad-0-1-85-220-0.png/100x100bb.jpg",
+      "Daily Prayers": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/8b/00/59/8b005995-708f-d0a7-024a-bc033e23943b/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
+      "Prayer": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/0a/a1/9b/0aa19bf7-0cce-37d9-f578-a3376f3108a6/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
+      "Reel Short Stories": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/19/32/a8/1932a840-902d-4337-cda8-b102c558c66c/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/100x100bb.jpg",
+      "Girls Therapy": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/78/cf/84/78cf845e-28ba-f41b-1261-8b85332373c0/AppIcon-0-0-1x_U007emarketing-0-11-0-0-85-220.png/100x100bb.jpg"
+    };
     const labels = { new_subscription: "New Subscription", trial_to_paid: "Trial \u2192 Paid", one_time_purchase: "One-Time Purchase" };
     function timeAgo(date) {
       const now = new Date(); const diff = (now - date) / 1000;
@@ -98,11 +111,15 @@
     }
     function renderTx(tx) {
       const type = tx.transaction_type || "unknown";
-      const icon = icons[type] || "\u{1F4E6}";
       const label = labels[type] || type;
       const ts = tx.received_at?.toDate ? tx.received_at.toDate() : new Date(tx.event_timestamp_ms || Date.now());
       const flag = countryToFlag(tx.country_code);
-      return '<div class="tx-card"><div class="tx-left"><div class="tx-icon ' + type + '">' + icon + '</div><div class="tx-info"><h3>' + (tx.app_name || "Unknown") + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + formatExactTime(ts) + ' \u00b7 ' + timeAgo(ts) + '</div></div></div>';
+      const appName = tx.app_name || "Unknown";
+      const iconUrl = appIcons[appName];
+      const iconHtml = iconUrl
+        ? '<img src="' + iconUrl + '" alt="' + appName + '" />'
+        : appName.charAt(0);
+      return '<div class="tx-card"><div class="tx-left"><div class="tx-icon">' + iconHtml + '</div><div class="tx-info"><h3>' + appName + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + formatExactTime(ts) + ' \u00b7 ' + timeAgo(ts) + '</div></div></div>';
     }
     function renderAll() {
       const container = document.getElementById("container");
