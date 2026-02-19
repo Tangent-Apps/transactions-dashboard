@@ -14,13 +14,13 @@ function resolveAppName(appId, productId) {
   const id = (appId + productId).toLowerCase();
   if (id.includes("girltalk") || id.includes("girl_talk")) return "GirlTalk";
   if (id.includes("girlwalk") || id.includes("girl_walk")) return "GirlWalk";
-    if (id.includes("music")) return "Christian Music";
-  if (id.includes("christian") || id.incudes("cdt")) return "Christian Daily Task";
+  if (id.includes("music")) return "Christian Music";
+  if (id.includes("christian") || id.includes("cdt")) return "Christian Daily Task";
   if (id.includes("spicy")) return "Spicy Stories";
   if (id.includes("hola")) return "Hola";
   if (id.includes("stretch")) return "Better Stretch";
-    if (id.includes("poly")) return "Poly AI";
-  if (id.includes("girlies") || id.includes"therapy")) return "GirlTalk";
+  if (id.includes("poly")) return "Poly AI";
+  if (id.includes("girlies") || id.includes("therapy")) return "GirlTalk";
   if (id.includes("prayer")) return "Prayer";
   if (id.includes("mew")) return "Mew";
   if (id.includes("crime") || id.includes("noir")) return "Crime Novels";
@@ -71,7 +71,9 @@ functions.http("rcWebhook", async (req, res) => {
       purchased_at_ms: e.purchased_at_ms || null,
       received_at: admin.firestore.FieldValue.serverTimestamp(),
       period_type: e.period_type || null,
-      is_trial_conversion: itc || false
+      is_trial_conversion: itc || false,
+      app_user_id: e.app_user_id || "",
+      original_transaction_id: e.original_transaction_id || ""
     };
 
     if (e.environment === "SANDBOX") tx.is_sandbox = true;
