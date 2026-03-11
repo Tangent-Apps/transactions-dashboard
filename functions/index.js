@@ -1,14 +1,9 @@
 const functions = require("@google-cloud/functions-framework");
 const admin = require("firebase-admin");
+const { Webhook } = require("svix");
 
 admin.initializeApp();
 const db = admin.firestore();
-
-const CONVERSION_EVENTS = new Set([
-  "INITIAL_PURCHASE",
-  "RENEWAL",
-  "NON_RENEWING_PURCHASE"
-]);
 
 function resolveAppName(appId, productId) {
   const id = (appId + productId).toLowerCase();
@@ -34,49 +29,60 @@ function resolveAppName(appId, productId) {
   return appId || "Unknown";
 }
 
-functions.http("rcWebhook", async (req, res) => {
+functions.http("swWebhook", async (req, res) => {
   if (req.method !== "POST") return res.status(405).send("Not allowed");
   try {
-    const e = req.body.event;
-    if (!e) return res.status(400).send("No event");
+    // Verify Superwall signature using Svix
+    const secret = process.env.SUPERWALL_WEBHOOK_SECRET;
+    if (!secret) return res.status(500).send("Missing webhook secret");
 
-    const t = e.type;
-    if (!CONVERSION_EVENTS.has(t)) return res.status(200).send("Ignored");
+    const wh = new Webhook(secret);
+    let payload;
+    try {
+      payload = wh.verify(req.rawBody, {
+        "svix-id": req.headers["svix-id"],
+        "svix-timestamp": req.headers["svix-timestamp"],
+        "svix-signature": req.headers["svix-signature"],
+      });
+    } catch (verifyErr) {
+      console.warn("Signature verification failed:", verifyErr.message);
+      return res.status(401).send("Invalid signature");
+    }
 
-    if (t === "INITIAL_PURCHASE" && e.period_type === "TRIAL")
-      return res.status(200).send("Skip trial");
+    const type = payload.type;
+    const data = payload.data || {};
 
-    const itc = t === "RENEWAL" && e.period_type === "NORMAL" &&
-      (e.is_trial_conversion === true || e.renewal_number === 1);
-    if (t === "RENEWAL" && !itc) return res.status(200).send("Skip renewal");
-
+    // Determine transaction type — skip events we don't care about
     let tt;
-    if (t === "NON_RENEWING_PURCHASE") tt = "one_time_purchase";
-    else if (t === "INITIAL_PURCHASE") tt = "new_subscription";
-    else if (itc) tt = "trial_to_paid";
-    else tt = "unknown";
+    if (type === "initial_purchase") {
+      if (data.periodType === "TRIAL") return res.status(200).send("Skip trial start");
+      tt = "new_subscription";
+    } else if (type === "renewal") {
+      if (!data.isTrialConversion) return res.status(200).send("Skip renewal");
+      tt = "trial_to_paid";
+    } else if (type === "non_renewing_purchase") {
+      tt = "one_time_purchase";
+    } else {
+      return res.status(200).send("Ignored");
+    }
 
     const tx = {
-      event_type: t,
+      event_type: type,
       transaction_type: tt,
-      app_id: e.app_id || "",
-      app_name: resolveAppName(e.app_id || "", e.product_id || ""),
-      product_id: e.product_id || "",
-      price: e.price || e.price_in_purchased_currency || 0,
-      currency: e.currency || "USD",
-      store: e.store || "UNKNOWN",
-      environment: e.environment || "PRODUCTION",
-      country_code: e.country_code || "",
-      event_timestamp_ms: e.event_timestamp_ms || Date.now(),
-      purchased_at_ms: e.purchased_at_ms || null,
+      app_name: resolveAppName(data.bundleId || "", data.productId || ""),
+      product_id: data.productId || "",
+      price: data.price || 0,
+      currency: data.currencyCode || "USD",
+      store: data.store || "UNKNOWN",
+      environment: data.environment || "PRODUCTION",
+      country_code: data.countryCode || "",
       received_at: admin.firestore.FieldValue.serverTimestamp(),
-      period_type: e.period_type || null,
-      is_trial_conversion: itc || false,
-      app_user_id: e.app_user_id || "",
-      original_transaction_id: e.original_transaction_id || ""
+      purchased_at_ms: data.purchasedAt ? new Date(data.purchasedAt).getTime() : null,
+      is_trial_conversion: data.isTrialConversion || false,
+      app_user_id: data.originalAppUserId || "",
+      original_transaction_id: data.originalTransactionId || "",
+      is_sandbox: data.environment === "SANDBOX",
     };
-
-    if (e.environment === "SANDBOX") tx.is_sandbox = true;
 
     await db.collection("transactions").add(tx);
     return res.status(200).send("OK");

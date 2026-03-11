@@ -191,7 +191,7 @@
         : appName.charAt(0);
       const userId = tx.app_user_id || "";
       const idHtml = userId
-        ? '<div class="tx-id" onclick="copyTxId(\'' + userId.replace(/'/g, "\\'") + '\', this)" title="Click to copy full RC customer ID">' + truncateId(userId) + ' \u2398</div>'
+        ? '<div class="tx-id" onclick="copyTxId(\'' + userId.replace(/'/g, "\\'") + '\', this)" title="Click to copy App User ID">' + truncateId(userId) + ' \u2398</div>'
         : "";
       return '<div class="tx-card"><div class="tx-left"><div class="tx-icon">' + iconHtml + '</div><div class="tx-info"><h3>' + appName + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + formatExactTime(ts) + ' \u00b7 ' + timeAgo(ts) + '</div>' + idHtml + '</div></div>';
     }
@@ -210,7 +210,7 @@
       if (filtered.length === 0) {
         const msg = viewMode === "live"
           ? '<div class="empty-state"><h2>No transactions today</h2><p>Switch to History to see past transactions.</p></div>'
-          : '<div class="empty-state"><h2>No transactions yet</h2><p>Transactions will appear here as they come in from RevenueCat.</p></div>';
+          : '<div class="empty-state"><h2>No transactions yet</h2><p>Transactions will appear here as they come in from Superwall.</p></div>';
         container.innerHTML = msg;
         return;
       }
