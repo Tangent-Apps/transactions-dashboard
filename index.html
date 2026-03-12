@@ -157,7 +157,9 @@
       return String.fromCodePoint(...codePoints);
     }
     function getTxDate(tx) {
-      return tx.received_at?.toDate ? tx.received_at.toDate() : new Date(tx.event_timestamp_ms || 0);
+      if (tx.received_at?.toDate) return tx.received_at.toDate();
+      if (tx.purchased_at_ms) return new Date(tx.purchased_at_ms);
+      return new Date(tx.event_timestamp_ms || 0);
     }
     function getDayKey(date) {
       const d = new Date(date); d.setHours(0, 0, 0, 0); return d.getTime();
