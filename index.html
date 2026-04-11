@@ -99,7 +99,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getFirestore, collection, query, orderBy, limit, startAfter, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { getFirestore, collection, query, where, orderBy, limit, startAfter, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyCnfHM5rp-p1wuEMN2BPE4koLrp9WqcQ_c",
@@ -274,7 +274,7 @@
 
     async function loadMore() {
       if (!lastDoc) return;
-      const q = query(collection(db, "transactions"), orderBy("received_at", "desc"), startAfter(lastDoc), limit(PAGE_SIZE));
+      const q = query(collection(db, "transactions"), where("is_sandbox", "==", false), orderBy("received_at", "desc"), startAfter(lastDoc), limit(PAGE_SIZE));
       const snap = await getDocs(q);
       if (snap.empty) { lastDoc = null; renderAll(); return; }
       snap.forEach(doc => allTxs.push(doc.data()));
@@ -283,7 +283,7 @@
     }
 
     function startListening() {
-      const q = query(collection(db, "transactions"), orderBy("received_at", "desc"), limit(SNAPSHOT_SIZE));
+      const q = query(collection(db, "transactions"), where("is_sandbox", "==", false), orderBy("received_at", "desc"), limit(SNAPSHOT_SIZE));
       onSnapshot(q, (snapshot) => {
         allTxs = [];
         snapshot.forEach(doc => allTxs.push(doc.data()));
