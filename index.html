@@ -42,6 +42,7 @@
 
     /* KPI strip */
     .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+    .kpis.kpis-4 { grid-template-columns: repeat(4, 1fr); }
     .kpi { background: #141414; border: 1px solid #232323; border-radius: 10px; padding: 12px 14px; min-width: 0; }
     .kpi .k-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
     .kpi .k-value { font-size: 20px; font-weight: 700; color: #fff; margin-top: 4px; line-height: 1.15; }
@@ -237,6 +238,59 @@
 
     const CONVERSION_TYPES = new Set(["new_subscription", "trial_to_paid", "one_time_purchase"]);
 
+    // Superwall app_name → applicationId (iOS by default). Stripe/Android variants merged best-effort.
+    const SW_APP_IDS = {
+      "GirlTalk": [22372, 42671],
+      "GirlWalk": [32830, 44480],
+      "Christian Daily Task": [28209],
+      "Christian Daily Tasks": [28209],
+      "Christian Music": [29053, 38342],
+      "Christian Music AI": [29053, 38342],
+      "Spicy Stories": [23954],
+      "Hola": [24574],
+      "Better Stretch": [32829],
+      "Better Walk": [28190],
+      "Better Breath": [41169],
+      "Poly AI": [35269],
+      "Quit Alcohol": [42734],
+      "Baby Food Scan": [44197],
+      "Yarn Ai": [43349],
+      "Therapy Girlies": [23873],
+      "Solo Girlies": [22373],
+      "Speak & Learn Spanish: Dora": [31709],
+    };
+    const SUPERWALL_STATS_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/superwallStats";
+    let swStats = null;
+    let swStatsLoading = false;
+
+    async function fetchSwStats() {
+      try {
+        swStatsLoading = true;
+        renderAll();
+        const user = auth.currentUser;
+        if (!user) { swStats = null; return; }
+        const idToken = await user.getIdToken();
+        // For "all" → call with no appId. For specific app → call once per swAppId, sum/avg client-side (simple: first id only for now).
+        const ids = currentApp === "all" ? [null] : (SW_APP_IDS[currentApp] || [null]);
+        // Just take first ID — combining requires reaggregating active subs etc.
+        const appId = ids[0];
+        const url = SUPERWALL_STATS_URL + (appId ? "?appId=" + appId : "");
+        const r = await fetch(url, { headers: { Authorization: "Bearer " + idToken } });
+        if (!r.ok) {
+          console.warn("superwallStats failed:", r.status, await r.text());
+          swStats = null;
+        } else {
+          swStats = await r.json();
+        }
+      } catch (e) {
+        console.warn("sw stats error", e);
+        swStats = null;
+      } finally {
+        swStatsLoading = false;
+        renderAll();
+      }
+    }
+
     window.setViewMode = function(mode) {
       viewMode = mode;
       document.getElementById("toggleLive").className = "toggle-btn" + (mode === "live" ? " live-active" : "");
@@ -331,6 +385,15 @@
       return { net, convCount, renewCount, refundCount, refundAbs, total: txs.length };
     }
 
+    function formatPct(v, decimals) {
+      if (v === null || v === undefined || Number.isNaN(v)) return "—";
+      return Number(v).toFixed(decimals != null ? decimals : 1) + "%";
+    }
+    function deltaPct(today, yest) {
+      if (today == null || yest == null || yest === 0) return null;
+      return ((today - yest) / yest) * 100;
+    }
+
     // KPI strip — uses all available txs (not just filtered to today)
     function renderKpis() {
       const now = new Date();
@@ -387,10 +450,35 @@
         : 'no data yest';
       const vsYestClass = delta === null ? '' : (delta >= 0 ? 'up' : 'down');
 
+      // Superwall KPIs override (4 cards). Falls back to legacy 3 cards if not loaded yet.
+      if (swStats && swStats.today) {
+        const t = swStats.today, y = swStats.yest || {};
+        function kpiPair(label, todayVal, yestVal, fmt) {
+          const dPct = deltaPct(todayVal, yestVal);
+          const subVal = yestVal != null ? "y: " + fmt(yestVal) : "—";
+          const subDelta = dPct != null
+            ? (dPct >= 0 ? " ↑" : " ↓") + Math.abs(dPct).toFixed(0) + "%"
+            : "";
+          const subClass = dPct == null ? "" : (dPct >= 0 ? "up" : "down");
+          return '<div class="kpi"><div class="k-label">' + label + '</div>' +
+            '<div class="k-value">' + fmt(todayVal) + '</div>' +
+            '<div class="k-sub ' + subClass + '">' + subVal + subDelta + '</div></div>';
+        }
+        const pct = v => formatPct(v, 1);
+        return '<div class="kpis kpis-4">' +
+          kpiPair("Initial conversion", t.initialConversion, y.initialConversion, pct) +
+          kpiPair("Trial conversion", t.trialConversion, y.trialConversion, pct) +
+          kpiPair("Cancellation %", t.cancellationRate, y.cancellationRate, pct) +
+          kpiPair("Billing issue rate", t.billingIssueRate, y.billingIssueRate, pct) +
+        '</div>';
+      }
+
+      // Fallback (during initial load before swStats arrives)
+      const loadingNote = swStatsLoading ? '<div class="k-sub">loading…</div>' : '';
       return '<div class="kpis">' +
         primary +
         kpi("vs Yesterday", formatCurrencyCompact(yestToNow), vsYest, vsYestClass) +
-        kpi("Trial → Paid 7d", weekConv.toString(), "conversions") +
+        '<div class="kpi"><div class="k-label">Superwall KPIs</div><div class="k-value">…</div>' + loadingNote + '</div>' +
       '</div>';
     }
 
@@ -521,7 +609,7 @@
       filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All</button>' +
         apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
       filtersEl.querySelectorAll(".filter-btn").forEach(btn => {
-        btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateFilters(); renderAll(); });
+        btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateFilters(); renderAll(); fetchSwStats(); });
       });
     }
 
@@ -550,6 +638,7 @@
 
     function startDashboard() {
       startListening();
+      fetchSwStats();
     }
   </script>
 </body>
