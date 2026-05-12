@@ -169,19 +169,47 @@ const TRIAL_LAG_DAYS = 3;
 async function fetchSwStats(appId) {
   const appFilter = appId ? "AND applicationId = " + Number(appId) : "";
 
-  // Pull 14 days of daily counters from open_revenue (no 7-day cap on this table).
+  // Cohort-by-trial-start: matches Superwall Charts methodology.
+  // Trial starts filtered to paywall-originated trials only (paywallId > 0) — Charts note:
+  // "only includes trials started on a Superwall paywall".
+  // Outcomes (conversions/cancellations/billing_issues) are joined via originalTransactionId
+  // so they attribute to the trial-start day, not the event day.
+  // Outcome lookup window extends 7d past today() to capture late conversions of trials
+  // started in the 14-day cohort window.
   const eventsSql = `
+WITH trials AS (
+  SELECT
+    originalTransactionId AS otid,
+    toDate(ts, 'UTC') AS trial_day
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND name = 'initial_purchase'
+    AND lower(periodType) = 'trial'
+    AND paywallId > 0
+    AND ts >= today() - 13
+    AND ts < today() + 1
+),
+outcomes AS (
+  SELECT
+    originalTransactionId AS otid,
+    name AS oname,
+    periodType AS optype
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND name IN ('renewal','cancellation','billing_issue')
+    AND ts >= today() - 13
+    AND ts < today() + 8
+)
 SELECT
-  toDate(ts, 'UTC') AS day,
-  countIf(name='initial_purchase' AND lower(periodType)='trial') AS trial_starts,
-  countIf(name='renewal' AND isTrialConversion=1) AS trial_conversions,
-  countIf(name='cancellation' AND lower(periodType)='trial') AS trial_cancellations,
-  countIf(name='billing_issue' AND lower(periodType)='trial') AS in_billing_retry
-FROM open_revenue.attributed_events_by_ts_rep
-WHERE isSandbox = 0
-  ${appFilter}
-  AND ts >= today() - 13
-  AND ts < today() + 1
+  trials.trial_day AS day,
+  uniq(trials.otid) AS trial_starts,
+  uniqIf(trials.otid, outcomes.oname = 'renewal') AS trial_conversions,
+  uniqIf(trials.otid, outcomes.oname = 'cancellation' AND lower(outcomes.optype) = 'trial') AS trial_cancellations,
+  uniqIf(trials.otid, outcomes.oname = 'billing_issue' AND lower(outcomes.optype) = 'trial') AS in_billing_retry
+FROM trials
+LEFT JOIN outcomes ON trials.otid = outcomes.otid
 GROUP BY day
 ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
