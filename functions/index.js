@@ -162,84 +162,184 @@ async function swQuery(sql) {
   return text.trim().split("\n").filter(Boolean).map(JSON.parse);
 }
 
+// Trial length lag — Superwall trials typically 3 days. After D, conversions/cancellations
+// land 3 days later. So "today's" TTP/cancel/billing for cohort started 3 days ago.
+const TRIAL_LAG_DAYS = 3;
+
 async function fetchSwStats(appId) {
   const appFilter = appId ? "AND applicationId = " + Number(appId) : "";
-  // Daily counters from open_revenue: last 2 rolling 24h windows
+
+  // Pull 14 days of daily counters from open_revenue (no 7-day cap on this table).
   const eventsSql = `
 SELECT
-  if(ts >= now() - INTERVAL 24 HOUR, 'today', 'yest') AS bucket,
+  toDate(ts, 'UTC') AS day,
   countIf(name='initial_purchase' AND lower(periodType)='trial') AS trial_starts,
-  countIf(name='initial_purchase' AND lower(periodType)!='trial') AS direct_purchases,
   countIf(name='renewal' AND isTrialConversion=1) AS trial_conversions,
-  countIf(name='cancellation') AS cancellations,
-  countIf(name='billing_issue') AS billing_issues,
-  countIf(name='renewal' AND isTrialConversion=0) AS renewals
+  countIf(name='cancellation' AND lower(periodType)='trial') AS trial_cancellations,
+  countIf(name='billing_issue' AND lower(periodType)='trial') AS in_billing_retry
 FROM open_revenue.attributed_events_by_ts_rep
 WHERE isSandbox = 0
   ${appFilter}
-  AND ts >= now() - INTERVAL 48 HOUR
-  AND ts < now()
-GROUP BY bucket
+  AND ts >= today() - 13
+  AND ts < today() + 1
+GROUP BY day
+ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
 
-  const opensSql = `
+  // events_rep has 7-day window cap. Pull last 7 days for ITT + Paywall Rate.
+  const funnelSql = `
 SELECT
-  if(ts >= now() - INTERVAL 24 HOUR, 'today', 'yest') AS bucket,
-  count() AS opens
+  toDate(ts, 'UTC') AS day,
+  uniqIf(JSONExtractString(meta, 'appUserId'), name='first_seen') AS new_users,
+  uniqIf(JSONExtractString(meta, 'appUserId'), name='paywall_open') AS paywalled_users
 FROM sw.events_rep
 WHERE isSandbox = 0
   ${appFilter}
-  AND name = 'paywall_open'
-  AND ts >= now() - INTERVAL 48 HOUR
-  AND ts < now()
-GROUP BY bucket
+  AND name IN ('first_seen','paywall_open')
+  AND ts >= today() - 6
+  AND ts < today() + 1
+GROUP BY day
+ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
 
-  const activeSql = `
-SELECT count() AS active
-FROM sw.subscription_status_rep FINAL
-WHERE isSandbox = 0
-  AND isDeleted = 0
-  ${appFilter}
-  AND JSONExtractString(props, '$status') = 'ACTIVE'
-FORMAT JSONEachRow`.trim();
-
-  const [events, opens, active] = await Promise.all([
+  const [events, funnel] = await Promise.all([
     swQuery(eventsSql),
-    swQuery(opensSql),
-    swQuery(activeSql),
+    swQuery(funnelSql),
   ]);
 
-  const evByBucket = { today: {}, yest: {} };
-  for (const row of events) evByBucket[row.bucket] = row;
-  const opByBucket = { today: 0, yest: 0 };
-  for (const row of opens) opByBucket[row.bucket] = Number(row.opens || 0);
-  const activeCount = Number((active[0] && active[0].active) || 0);
+  // Build map by day string YYYY-MM-DD
+  const evMap = new Map();
+  for (const r of events) evMap.set(r.day, r);
+  const fnMap = new Map();
+  for (const r of funnel) fnMap.set(r.day, r);
 
-  function num(b, k) { return Number((evByBucket[b] || {})[k] || 0); }
-  function pct(n, d) { return d > 0 ? (n / d) * 100 : null; }
-
-  function bucketMetrics(b) {
-    const trialStarts = num(b, 'trial_starts');
-    const directPurchases = num(b, 'direct_purchases');
-    const trialConversions = num(b, 'trial_conversions');
-    const cancellations = num(b, 'cancellations');
-    const billingIssues = num(b, 'billing_issues');
-    const renewals = num(b, 'renewals');
-    const opensTotal = opByBucket[b];
-    return {
-      initialConversion: pct(trialStarts + directPurchases, opensTotal),
-      trialConversion: pct(trialConversions, trialStarts),
-      cancellationRate: activeCount > 0 ? (cancellations / activeCount) * 100 : null,
-      billingIssueRate: pct(billingIssues, renewals + billingIssues),
-      counts: { trialStarts, directPurchases, trialConversions, cancellations, billingIssues, renewals, opens: opensTotal },
-    };
+  function dStr(d) {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
   }
 
+  function pct(n, d) { return d > 0 ? (n / d) * 100 : null; }
+
+  // Build series for last 7 displayable days (each ending TRIAL_LAG_DAYS ago for trial metrics)
+  // Most recent meaningful "today" = today - TRIAL_LAG_DAYS for trial-cohort metrics
+  // But ITT + Paywall Rate are not lagged — they reflect that day's funnel.
+  // We'll return:
+  //   - trial metrics: series of 7 days ending today - TRIAL_LAG_DAYS
+  //   - funnel metrics: series of 7 days ending today
+  const todayUTC = new Date();
+  todayUTC.setUTCHours(0, 0, 0, 0);
+
+  function buildSeries(endOffset) {
+    // endOffset = how many days back from today the most recent day is
+    const out = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(todayUTC);
+      d.setUTCDate(d.getUTCDate() - endOffset - i);
+      out.push(dStr(d));
+    }
+    return out.reverse(); // oldest → newest
+  }
+
+  const trialDays = buildSeries(TRIAL_LAG_DAYS); // for TTP, cancel%, billing%
+  const funnelDays = buildSeries(0);             // for ITT, paywall rate
+
+  // For each trial day d:
+  //   trial_starts on d → cohort. After lag, observe their conversions/cancellations/billing-issues.
+  //   The brief uses: trial_conversions[d_observe] / trial_starts[d_observe - lag], where d_observe = today.
+  //   Equivalent if we treat "today" as the observation day. But brief shows daily series of OBSERVATION days,
+  //   each with their own cohort.
+  //   Simpler approach matching brief: for each observation day d (= today - lag - i), show
+  //     conversions[d] / trial_starts[d - lag]
+  //   Or, cohort-anchored: for each cohort day c, show conversions[c + lag] / trial_starts[c].
+  //   Brief format: trial_conversions on day d divided by trial_starts on day d (no shift), then drop the
+  //   most recent lag days because they're incomplete. → "12.5% (5/40)" where 5=conversions on d, 40=trial_starts on d.
+  //   Re-reading: "(In Billing Retry / Trial Starts)" daily — so numerator and denominator are SAME-DAY.
+  //   So the lag is just: skip the most recent N days because trial_starts on those days haven't had time
+  //   to convert/cancel/billing yet. NOT a shift.
+  //   Bottom line: numerator and denominator from SAME day, but only show days that are old enough
+  //   (today - lag onward).
+
+  const trialSeries = trialDays.map(day => {
+    const e = evMap.get(day) || {};
+    const ts = Number(e.trial_starts || 0);
+    const tc = Number(e.trial_conversions || 0);
+    const tcn = Number(e.trial_cancellations || 0);
+    const ibr = Number(e.in_billing_retry || 0);
+    return {
+      day,
+      trial_starts: ts,
+      trial_conversions: tc,
+      trial_cancellations: tcn,
+      in_billing_retry: ibr,
+      ttp: pct(tc, ts),
+      cancellation_rate: pct(tcn, ts),
+      billing_issue_rate: pct(ibr, ts),
+    };
+  });
+
+  const funnelSeries = funnelDays.map(day => {
+    const f = fnMap.get(day) || {};
+    const newUsers = Number(f.new_users || 0);
+    const paywalled = Number(f.paywalled_users || 0);
+    // ITT = Converted Users / New Users. Converted Users on same day = users who started trial.
+    // Approximation: use trial_starts (event count, not distinct user) from open_revenue.
+    // Brief uses Mixpanel-style distinct user count, but we don't have that easily.
+    const e = evMap.get(day) || {};
+    const converted = Number(e.trial_starts || 0); // event count (close approximation)
+    return {
+      day,
+      new_users: newUsers,
+      converted_users: converted,
+      paywalled_users: paywalled,
+      paywall_opens: 0, // not separately tracked here
+      itt: pct(converted, newUsers),
+      paywall_rate: pct(paywalled, newUsers),
+    };
+  });
+
+  // "Today" and "yesterday" headline values = the most recent day in each series
+  const trialToday = trialSeries[trialSeries.length - 1];
+  const trialYest = trialSeries[trialSeries.length - 2];
+  const funnelToday = funnelSeries[funnelSeries.length - 1];
+  const funnelYest = funnelSeries[funnelSeries.length - 2];
+
   return {
-    activeSubs: activeCount,
-    today: bucketMetrics('today'),
-    yest: bucketMetrics('yest'),
+    today: {
+      ittRate: funnelToday.itt,
+      ttpRate: trialToday.ttp,
+      cancellationRate: trialToday.cancellation_rate,
+      billingIssueRate: trialToday.billing_issue_rate,
+      paywallRate: funnelToday.paywall_rate,
+      counts: {
+        trial_starts: trialToday.trial_starts,
+        trial_conversions: trialToday.trial_conversions,
+        trial_cancellations: trialToday.trial_cancellations,
+        in_billing_retry: trialToday.in_billing_retry,
+        new_users: funnelToday.new_users,
+        converted_users: funnelToday.converted_users,
+        paywalled_users: funnelToday.paywalled_users,
+      },
+    },
+    yest: {
+      ittRate: funnelYest.itt,
+      ttpRate: trialYest.ttp,
+      cancellationRate: trialYest.cancellation_rate,
+      billingIssueRate: trialYest.billing_issue_rate,
+      paywallRate: funnelYest.paywall_rate,
+      counts: {
+        trial_starts: trialYest.trial_starts,
+        trial_conversions: trialYest.trial_conversions,
+        trial_cancellations: trialYest.trial_cancellations,
+        in_billing_retry: trialYest.in_billing_retry,
+        new_users: funnelYest.new_users,
+        converted_users: funnelYest.converted_users,
+        paywalled_users: funnelYest.paywalled_users,
+      },
+    },
+    series: { trial: trialSeries, funnel: funnelSeries },
+    trialLagDays: TRIAL_LAG_DAYS,
   };
 }
 

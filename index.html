@@ -43,6 +43,7 @@
     /* KPI strip */
     .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
     .kpis.kpis-4 { grid-template-columns: repeat(4, 1fr); }
+    .kpis.kpis-5 { grid-template-columns: repeat(5, 1fr); }
     .kpi { background: #141414; border: 1px solid #232323; border-radius: 10px; padding: 12px 14px; min-width: 0; }
     .kpi .k-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
     .kpi .k-value { font-size: 20px; font-weight: 700; color: #fff; margin-top: 4px; line-height: 1.15; }
@@ -450,26 +451,42 @@
         : 'no data yest';
       const vsYestClass = delta === null ? '' : (delta >= 0 ? 'up' : 'down');
 
-      // Superwall KPIs override (4 cards). Falls back to legacy 3 cards if not loaded yet.
+      // Superwall KPIs override (5 cards). Falls back to legacy 3 cards if not loaded yet.
       if (swStats && swStats.today) {
         const t = swStats.today, y = swStats.yest || {};
-        function kpiPair(label, todayVal, yestVal, fmt) {
+        // For trial-cohort KPIs, "today" actually means today - 3 (cohort lag). Note in subtitle.
+        const lag = swStats.trialLagDays || 3;
+        function kpiPair(label, todayVal, yestVal, fmt, extra) {
           const dPct = deltaPct(todayVal, yestVal);
-          const subVal = yestVal != null ? "y: " + fmt(yestVal) : "—";
-          const subDelta = dPct != null
+          // Direction interpretation: for negative-signal metrics (cancel/billing), down is good
+          const negSignal = (label === "Cancellation %" || label === "Billing issue rate");
+          const yestStr = yestVal != null && !Number.isNaN(yestVal) ? "y: " + fmt(yestVal) : "y: —";
+          const deltaStr = dPct != null
             ? (dPct >= 0 ? " ↑" : " ↓") + Math.abs(dPct).toFixed(0) + "%"
             : "";
-          const subClass = dPct == null ? "" : (dPct >= 0 ? "up" : "down");
-          return '<div class="kpi"><div class="k-label">' + label + '</div>' +
+          let subClass = "";
+          if (dPct != null) {
+            const isUp = dPct >= 0;
+            subClass = negSignal ? (isUp ? "down" : "up") : (isUp ? "up" : "down");
+          }
+          const titleAttr = extra ? ' title="' + extra + '"' : '';
+          return '<div class="kpi"' + titleAttr + '><div class="k-label">' + label + '</div>' +
             '<div class="k-value">' + fmt(todayVal) + '</div>' +
-            '<div class="k-sub ' + subClass + '">' + subVal + subDelta + '</div></div>';
+            '<div class="k-sub ' + subClass + '">' + yestStr + deltaStr + '</div></div>';
         }
         const pct = v => formatPct(v, 1);
-        return '<div class="kpis kpis-4">' +
-          kpiPair("Initial conversion", t.initialConversion, y.initialConversion, pct) +
-          kpiPair("Trial conversion", t.trialConversion, y.trialConversion, pct) +
-          kpiPair("Cancellation %", t.cancellationRate, y.cancellationRate, pct) +
-          kpiPair("Billing issue rate", t.billingIssueRate, y.billingIssueRate, pct) +
+        const tc = t.counts || {}, yc = y.counts || {};
+        return '<div class="kpis kpis-5">' +
+          kpiPair("Paywall rate", t.paywallRate, y.paywallRate, pct,
+            "paywalled_users / new_users (today)\n" + tc.paywalled_users + "/" + tc.new_users) +
+          kpiPair("ITT", t.ittRate, y.ittRate, pct,
+            "converted_users / new_users (today)\n" + tc.converted_users + "/" + tc.new_users) +
+          kpiPair("TTP", t.ttpRate, y.ttpRate, pct,
+            "trial_conversions / trial_starts (cohort " + lag + "d ago)\n" + tc.trial_conversions + "/" + tc.trial_starts) +
+          kpiPair("Cancellation %", t.cancellationRate, y.cancellationRate, pct,
+            "trial_cancellations / trial_starts (cohort " + lag + "d ago)\n" + tc.trial_cancellations + "/" + tc.trial_starts) +
+          kpiPair("Billing issue rate", t.billingIssueRate, y.billingIssueRate, pct,
+            "in_billing_retry / trial_starts (cohort " + lag + "d ago)\n" + tc.in_billing_retry + "/" + tc.trial_starts) +
         '</div>';
       }
 
