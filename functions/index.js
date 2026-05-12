@@ -214,18 +214,50 @@ GROUP BY day
 ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
 
-  // events_rep has 7-day window cap. Pull last 7 days for ITT + Paywall Rate.
+  // Funnel (ITT + Paywall Rate): cohort-by-install-day.
+  // - New Users = uniq users with app_install on day d (matches Charts "New Users")
+  // - Paywalled Users = of those new users, the subset that paywall_opened on day d
+  // - Converted Users = of those new users, the subset that started a trial on day d
+  // ITT = converted_users / new_users; Paywall Rate = paywalled_users / new_users.
+  // sw.events_rep has 7-day cap; this query stays within it.
   const funnelSql = `
+WITH installs AS (
+  SELECT toDate(ts, 'UTC') AS day, JSONExtractString(meta, 'appUserId') AS uid
+  FROM sw.events_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND name = 'app_install'
+    AND ts >= today() - 6
+    AND ts < today() + 1
+),
+paywall_opens AS (
+  SELECT toDate(ts, 'UTC') AS day, JSONExtractString(meta, 'appUserId') AS uid
+  FROM sw.events_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND name = 'paywall_open'
+    AND ts >= today() - 6
+    AND ts < today() + 1
+),
+trial_starts AS (
+  SELECT toDate(ts, 'UTC') AS day, appUserId AS uid
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND name = 'initial_purchase'
+    AND lower(periodType) = 'trial'
+    AND paywallId > 0
+    AND ts >= today() - 6
+    AND ts < today() + 1
+)
 SELECT
-  toDate(ts, 'UTC') AS day,
-  uniqIf(JSONExtractString(meta, 'appUserId'), name='first_seen') AS new_users,
-  uniqIf(JSONExtractString(meta, 'appUserId'), name='paywall_open') AS paywalled_users
-FROM sw.events_rep
-WHERE isSandbox = 0
-  ${appFilter}
-  AND name IN ('first_seen','paywall_open')
-  AND ts >= today() - 6
-  AND ts < today() + 1
+  i.day AS day,
+  uniq(i.uid) AS new_users,
+  uniqIf(i.uid, p.uid IS NOT NULL AND p.uid != '') AS paywalled_users,
+  uniqIf(i.uid, t.uid IS NOT NULL AND t.uid != '') AS converted_users
+FROM installs i
+LEFT JOIN paywall_opens p ON i.uid = p.uid AND i.day = p.day
+LEFT JOIN trial_starts t ON i.uid = t.uid AND i.day = t.day
 GROUP BY day
 ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
@@ -311,17 +343,12 @@ FORMAT JSONEachRow`.trim();
     const f = fnMap.get(day) || {};
     const newUsers = Number(f.new_users || 0);
     const paywalled = Number(f.paywalled_users || 0);
-    // ITT = Converted Users / New Users. Converted Users on same day = users who started trial.
-    // Approximation: use trial_starts (event count, not distinct user) from open_revenue.
-    // Brief uses Mixpanel-style distinct user count, but we don't have that easily.
-    const e = evMap.get(day) || {};
-    const converted = Number(e.trial_starts || 0); // event count (close approximation)
+    const converted = Number(f.converted_users || 0);
     return {
       day,
       new_users: newUsers,
       converted_users: converted,
       paywalled_users: paywalled,
-      paywall_opens: 0, // not separately tracked here
       itt: pct(converted, newUsers),
       paywall_rate: pct(paywalled, newUsers),
     };
