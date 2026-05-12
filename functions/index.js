@@ -54,12 +54,19 @@ functions.http("swWebhook", async (req, res) => {
 
     // Determine transaction type — skip events we don't care about
     let tt;
-    if (type === "initial_purchase") {
+    // Refund check FIRST (negative price overrides event type)
+    if (typeof data.price === "number" && data.price < 0) {
+      tt = "refund";
+    } else if (type === "initial_purchase") {
       if (data.periodType === "TRIAL") return res.status(200).send("Skip trial start");
       tt = "new_subscription";
     } else if (type === "renewal") {
-      if (!data.isTrialConversion) return res.status(200).send("Skip renewal");
-      tt = "trial_to_paid";
+      if (data.isTrialConversion || data.periodType === "TRIAL" || data.periodType === "INTRO") {
+        tt = "trial_to_paid";
+      } else {
+        // Normal paid renewal — includes recoveries from billing retry / grace period
+        tt = "renewal";
+      }
     } else if (type === "non_renewing_purchase") {
       tt = "one_time_purchase";
     } else {
@@ -71,8 +78,12 @@ functions.http("swWebhook", async (req, res) => {
       transaction_type: tt,
       app_name: resolveAppName(data.bundleId || "", data.productId || ""),
       product_id: data.productId || "",
-      price: data.price || 0,
-      currency: data.currencyCode || "USD",
+      // NOTE: Superwall's `price` and `proceeds` are always in USD.
+      // `priceInPurchasedCurrency` is in the user's local currency (currencyCode).
+      price: data.price || 0,                                         // USD
+      proceeds: data.proceeds || 0,                                   // USD
+      price_local: data.priceInPurchasedCurrency || 0,                // local currency
+      currency: data.currencyCode || "USD",                           // local currency code (for price_local)
       store: data.store || "UNKNOWN",
       environment: data.environment || "PRODUCTION",
       country_code: data.countryCode || "",

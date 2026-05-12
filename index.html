@@ -7,88 +7,125 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
-    .header { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
-    .header h1 { font-size: 18px; font-weight: 600; color: #fff; }
 
-    /* Filters */
-    .filters { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; padding: 10px 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; position: sticky; top: 57px; z-index: 9; }
-    .filters-left { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .filter-btn { padding: 6px 14px; border-radius: 20px; border: 1px solid #333; background: transparent; color: #aaa; font-size: 13px; cursor: pointer; transition: all 0.15s; }
-    .filter-btn:hover { border-color: #555; color: #ddd; }
+    /* Combined sticky toolbar (replaces old .header + .filters + .type-filters) */
+    .toolbar {
+      background: #141414; border-bottom: 1px solid #232323;
+      padding: 10px 20px;
+      display: flex; align-items: center; gap: 12px;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .toolbar .brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #aaa; flex-shrink: 0; }
+    .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #4ade80; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    /* App filter chips — horizontal scroll with fade */
+    .filters-wrap { flex: 1; min-width: 0; position: relative; }
+    .filters { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px 24px 2px 2px; }
+    .filters::-webkit-scrollbar { display: none; }
+    .filters-wrap::after {
+      content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 32px;
+      background: linear-gradient(to right, transparent, #141414); pointer-events: none;
+    }
+    .filter-btn { padding: 5px 12px; border-radius: 16px; border: 1px solid #2a2a2a; background: transparent; color: #888; font-size: 12px; cursor: pointer; transition: all 0.15s; white-space: nowrap; flex-shrink: 0; }
+    .filter-btn:hover { border-color: #444; color: #ccc; }
     .filter-btn.active { background: #fff; color: #000; border-color: #fff; font-weight: 500; }
 
-    /* Live / History toggle */
-    .view-toggle { display: flex; background: #111; border: 1px solid #2a2a2a; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
-    .toggle-btn { padding: 6px 14px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: transparent; color: #555; transition: all 0.2s; white-space: nowrap; }
+    /* Live/History toggle */
+    .view-toggle { display: flex; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 7px; overflow: hidden; flex-shrink: 0; }
+    .toggle-btn { padding: 5px 12px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: transparent; color: #555; transition: all 0.2s; white-space: nowrap; }
     .toggle-btn.live-active { background: #1a2e1a; color: #4ade80; }
     .toggle-btn.history-active { background: #1e1e2e; color: #818cf8; }
 
-    /* Cards */
-    .container { max-width: 900px; margin: 0 auto; padding: 16px; }
-    .tx-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px 18px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; transition: background 0.15s; }
-    .tx-card:hover { background: #222; }
-    .tx-left { display: flex; align-items: center; gap: 14px; }
-    .tx-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; flex-shrink: 0; overflow: hidden; background: #2a2a2a; color: #aaa; }
-    .tx-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 10px; }
-    .tx-info h3 { font-size: 14px; font-weight: 500; color: #fff; margin-bottom: 3px; }
-    .tx-info p { font-size: 12px; color: #777; }
-    .tx-right { text-align: right; }
-    .tx-price { font-size: 16px; font-weight: 600; color: #4ade80; }
-    .tx-time { font-size: 11px; color: #666; margin-top: 2px; }
-    .tx-id { font-size: 10px; color: #444; margin-top: 3px; cursor: pointer; font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; transition: color 0.15s; }
+    /* Container */
+    .container { max-width: 1500px; margin: 0 auto; padding: 16px 20px; }
+
+    /* KPI strip */
+    .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+    .kpi { background: #141414; border: 1px solid #232323; border-radius: 10px; padding: 12px 14px; min-width: 0; }
+    .kpi .k-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
+    .kpi .k-value { font-size: 20px; font-weight: 700; color: #fff; margin-top: 4px; line-height: 1.15; }
+    .kpi .k-sub { font-size: 11px; color: #888; margin-top: 3px; }
+    .kpi .k-sub.up { color: #4ade80; }
+    .kpi .k-sub.down { color: #f87171; }
+    .kpi.primary { background: linear-gradient(135deg, #161616, #1c1c1c); }
+    .kpi.primary .k-value { font-size: 24px; }
+
+    /* 3-column layout (weighted: conversions, renewals, refunds) */
+    .columns { display: grid; grid-template-columns: 1.2fr 1.5fr 0.8fr; gap: 12px; }
+    .columns.no-refunds { grid-template-columns: 1fr 1fr; }
+    .col { background: #131313; border: 1px solid #232323; border-radius: 12px; padding: 12px; min-width: 0; display: flex; flex-direction: column; }
+    .col-header { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 4px 10px; border-bottom: 1px solid #232323; margin-bottom: 10px; gap: 8px; }
+    .col-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px; }
+    .col-title::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+    .col-title.conv { color: #4ade80; }
+    .col-title.conv::before { background: #4ade80; }
+    .col-title.renew { color: #c084fc; }
+    .col-title.renew::before { background: #c084fc; }
+    .col-title.refund { color: #f5a07a; }
+    .col-title.refund::before { background: #f5a07a; }
+    .col-totals { font-size: 11px; color: #888; text-align: right; }
+    .col-totals .amt { font-weight: 700; color: #fff; display: block; font-size: 13px; }
+    .col-totals .cnt { font-size: 10px; color: #777; }
+
+    /* Tx cards inside columns — compact */
+    .tx-card { background: #1a1a1a; border: 1px solid #232323; border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; transition: background 0.15s; display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; }
+    .tx-card:hover { background: #1f1f1f; }
+    .tx-card:last-child { margin-bottom: 0; }
+    .tx-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; overflow: hidden; background: #2a2a2a; color: #aaa; }
+    .tx-icon img { width: 100%; height: 100%; object-fit: cover; }
+    .tx-info { min-width: 0; }
+    .tx-info h3 { font-size: 13px; font-weight: 500; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tx-info p { font-size: 11px; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+    .tx-right { text-align: right; flex-shrink: 0; }
+    .tx-price { font-size: 14px; font-weight: 700; color: #4ade80; line-height: 1.2; }
+    .tx-price.refund { color: #f5a07a; }
+    .tx-price.renewal { color: #c084fc; }
+    .tx-time { font-size: 10px; color: #666; margin-top: 2px; }
+    .tx-id { font-size: 9px; color: #444; font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; margin-top: 2px; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; }
+    .tx-card:hover .tx-id { opacity: 1; }
     .tx-id:hover { color: #888; }
-    .tx-id.copied { color: #4ade80; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; margin-left: 6px; }
-    .badge.new_subscription { background: #1a3a2a; color: #4ade80; }
-    .badge.trial_to_paid { background: #1a2a3a; color: #60a5fa; }
-    .badge.one_time_purchase { background: #3a2a1a; color: #fbbf24; }
-
-    /* Day group headers */
-    .day-header { display: flex; align-items: baseline; justify-content: space-between; padding: 20px 0 8px; }
-    .day-header:first-child { padding-top: 4px; }
-    .day-label { font-size: 13px; font-weight: 600; color: #aaa; }
-    .day-summary { font-size: 13px; font-weight: 600; color: #fff; }
-
-    .show-more { display: block; width: 100%; padding: 14px; margin: 16px 0; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; color: #aaa; font-size: 14px; cursor: pointer; transition: all 0.15s; }
-    .show-more:hover { background: #222; color: #fff; }
-    .empty-state { text-align: center; padding: 80px 20px; color: #555; }
-    .empty-state h2 { font-size: 18px; margin-bottom: 8px; color: #777; }
-    .empty-state p { font-size: 14px; }
-    .loading { text-align: center; padding: 40px; color: #555; }
-    .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4ade80; margin-right: 6px; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .tx-id.copied { color: #4ade80; opacity: 1; }
     .country-flag { margin-left: 4px; }
 
-    /* Mobile optimisation */
-    @media (max-width: 640px) {
-      .header { padding: 12px 16px; }
-      .header h1 { font-size: 16px; }
-      .filters { padding: 10px 0 10px 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-      .filters::-webkit-scrollbar { display: none; }
-      .filters-left { flex-wrap: nowrap; padding-right: 16px; }
-      .filter-btn { white-space: nowrap; flex-shrink: 0; min-height: 36px; }
-      .container { padding: 10px; }
-      .tx-card { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px 14px; }
-      .tx-left { gap: 10px; }
-      .tx-right { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px; padding-left: 48px; }
-      .tx-price { font-size: 15px; }
-      .tx-time { font-size: 11px; margin-top: 0; }
-      .tx-id { margin-top: 0; }
-      .day-header { padding: 16px 0 6px; }
+    .empty-col { text-align: center; padding: 28px 12px; color: #444; font-size: 11px; }
+
+    /* Day group headers (history) */
+    .day-header { display: flex; align-items: baseline; justify-content: space-between; padding: 18px 0 8px; gap: 12px; flex-wrap: wrap; }
+    .day-header:first-child { padding-top: 0; }
+    .day-label { font-size: 13px; font-weight: 600; color: #aaa; }
+    .day-summary { font-size: 13px; font-weight: 600; color: #fff; text-align: right; }
+    .day-summary .breakdown { display: block; font-size: 11px; color: #888; font-weight: 500; margin-top: 2px; }
+    .day-summary .breakdown span { margin-left: 8px; }
+    .day-summary .breakdown .b-conv { color: #4ade80; }
+    .day-summary .breakdown .b-renew { color: #c084fc; }
+    .day-summary .breakdown .b-refund { color: #f5a07a; }
+
+    .show-more { display: block; width: 100%; padding: 12px; margin: 16px 0; background: #1a1a1a; border: 1px solid #232323; border-radius: 10px; color: #aaa; font-size: 13px; cursor: pointer; }
+    .show-more:hover { background: #222; color: #fff; }
+    .empty-state { text-align: center; padding: 60px 20px; color: #555; }
+    .empty-state h2 { font-size: 17px; margin-bottom: 6px; color: #777; }
+    .empty-state p { font-size: 13px; }
+    .loading { text-align: center; padding: 40px; color: #555; }
+
+    /* Mobile */
+    @media (max-width: 700px) {
+      .toolbar { padding: 8px 14px; gap: 8px; flex-wrap: wrap; }
+      .container { padding: 12px 14px; }
+      .kpis { grid-template-columns: repeat(2, 1fr); }
+      .kpi:nth-child(n+3) { display: none; }
+      .columns, .columns.no-refunds { grid-template-columns: 1fr; gap: 10px; }
+      .tx-card { grid-template-columns: 30px 1fr auto; padding: 9px 11px; }
+      .tx-id { opacity: 1; }
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1><span class="live-dot"></span> Transactions Dashboard</h1>
-  </div>
-
-  <div class="filters">
-    <div class="filters-left" id="filters">
-      <button class="filter-btn active" data-app="all">All Apps</button>
-    </div>
+  <div class="toolbar">
+    <span class="brand"><span class="live-dot"></span> Transactions</span>
+    <div class="filters-wrap"><div class="filters" id="filters"><button class="filter-btn active" data-app="all">All</button></div></div>
     <div class="view-toggle">
-      <button class="toggle-btn live-active" id="toggleLive" onclick="setViewMode('live')">● Live</button>
+      <button class="toggle-btn live-active" id="toggleLive" onclick="setViewMode('live')">Live</button>
       <button class="toggle-btn" id="toggleHistory" onclick="setViewMode('history')">History</button>
     </div>
   </div>
@@ -112,13 +149,15 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    const SNAPSHOT_SIZE = 100;
-    const PAGE_SIZE = 30;
+    const SNAPSHOT_SIZE = 200;
+    const PAGE_SIZE = 50;
     let lastDoc = null;
     let currentApp = "all";
     let viewMode = "live";
     let allTxs = [];
     let knownApps = new Set();
+
+    const CONVERSION_TYPES = new Set(["new_subscription", "trial_to_paid", "one_time_purchase"]);
 
     window.setViewMode = function(mode) {
       viewMode = mode;
@@ -127,11 +166,13 @@
       renderAll();
     };
 
-    window.copyTxId = function(fullId, el) {
+    window.copyTxId = function(fullId, el, ev) {
+      if (ev) ev.stopPropagation();
       navigator.clipboard.writeText(fullId).then(() => {
         el.classList.add("copied");
+        const orig = el.textContent;
         el.textContent = "copied!";
-        setTimeout(() => { el.classList.remove("copied"); el.textContent = fullId.length > 24 ? fullId.slice(-12) + " \u2398" : fullId + " \u2398"; }, 1500);
+        setTimeout(() => { el.classList.remove("copied"); el.textContent = orig; }, 1200);
       });
     };
 
@@ -152,22 +193,33 @@
       "Girls Therapy": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/78/cf/84/78cf845e-28ba-f41b-1261-8b85332373c0/AppIcon-0-0-1x_U007emarketing-0-11-0-0-85-220.png/100x100bb.jpg"
     };
 
-    const labels = { new_subscription: "Direct Subscription", trial_to_paid: "Trial \u2192 Paid", one_time_purchase: "One-Time Purchase" };
+    const labels = {
+      new_subscription: "New",
+      trial_to_paid: "Trial → Paid",
+      one_time_purchase: "One-time",
+      renewal: "Renewal",
+      refund: "Refund"
+    };
 
     function timeAgo(date) {
       const now = new Date(); const diff = (now - date) / 1000;
-      if (diff < 60) return Math.floor(diff) + "s ago";
-      if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-      if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-      if (diff < 604800) return Math.floor(diff / 86400) + "d ago";
-      return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      if (diff < 60) return Math.floor(diff) + "s";
+      if (diff < 3600) return Math.floor(diff / 60) + "m";
+      if (diff < 86400) return Math.floor(diff / 3600) + "h";
+      return Math.floor(diff / 86400) + "d";
     }
-    function formatExactTime(date) {
-      return date.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+    function formatTime(date) {
+      return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
     }
-    function formatCurrency(price, currency) {
-      try { return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD", minimumFractionDigits: 2 }).format(price); }
+    function formatCurrency(price) {
+      try { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(price); }
       catch { return "$" + Number(price).toFixed(2); }
+    }
+    function formatCurrencyCompact(price) {
+      const abs = Math.abs(price);
+      if (abs >= 1000) return (price < 0 ? "-" : "") + "$" + (abs / 1000).toFixed(abs >= 10000 ? 0 : 1) + "k";
+      try { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(price); }
+      catch { return "$" + Math.round(price); }
     }
     function countryToFlag(code) {
       if (!code || code.length !== 2) return "";
@@ -189,14 +241,84 @@
       if (ts === yesterday.getTime()) return "Yesterday";
       return new Date(ts).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
     }
-    function renderDayHeader(label, txs) {
-      const rev = txs.reduce((s, t) => s + (t.price || 0), 0);
-      const count = txs.length + " conversion" + (txs.length !== 1 ? "s" : "");
-      return '<div class="day-header"><span class="day-label">' + label + '</span><span class="day-summary">' + formatCurrency(rev, "USD") + ' \u00b7 ' + count + '</span></div>';
+    function summarize(txs) {
+      let net = 0, convCount = 0, renewCount = 0, refundCount = 0, refundAbs = 0;
+      for (const t of txs) {
+        const p = t.price || 0;
+        net += p;
+        if (t.transaction_type === "renewal") renewCount++;
+        else if (t.transaction_type === "refund") { refundCount++; refundAbs += Math.abs(p); }
+        else if (CONVERSION_TYPES.has(t.transaction_type)) convCount++;
+      }
+      return { net, convCount, renewCount, refundCount, refundAbs, total: txs.length };
     }
+
+    // KPI strip — uses all available txs (not just filtered to today)
+    function renderKpis() {
+      const now = new Date();
+      const today0 = new Date(now); today0.setHours(0, 0, 0, 0);
+      const yest0 = new Date(today0); yest0.setDate(yest0.getDate() - 1);
+      const mtd0 = new Date(now.getFullYear(), now.getMonth(), 1); mtd0.setHours(0, 0, 0, 0);
+      const week0 = new Date(today0); week0.setDate(week0.getDate() - 6); // last 7 days incl today
+
+      const txs = currentApp === "all" ? allTxs : allTxs.filter(t => t.app_name === currentApp);
+
+      let todayNet = 0, todayCount = 0;
+      let yestNet = 0;
+      let mtdNet = 0;
+      let weekConv = 0, weekTrials = 0;  // for trial→paid %
+      let weekRevenue = 0, weekRefunds = 0;
+
+      for (const t of txs) {
+        const d = getTxDate(t);
+        const p = t.price || 0;
+        const tt = t.transaction_type;
+        if (d >= mtd0) mtdNet += p;
+        if (d >= today0) { todayNet += p; todayCount++; }
+        else if (d >= yest0 && d < today0) yestNet += p;
+        if (d >= week0) {
+          if (p > 0) weekRevenue += p;
+          if (tt === "refund") weekRefunds += Math.abs(p);
+          if (tt === "trial_to_paid") weekConv++;
+          // trial starts aren't in dataset (we skip them), so trial→paid % approximated as conv / (conv+expirations). Skip for now.
+        }
+      }
+
+      // Yesterday-at-this-time comparison (more useful than full-yesterday)
+      const yestSameTime = new Date(now); yestSameTime.setDate(yestSameTime.getDate() - 1);
+      const yestStart = new Date(yest0);
+      let yestToNow = 0;
+      for (const t of txs) {
+        const d = getTxDate(t);
+        if (d >= yestStart && d <= yestSameTime) yestToNow += (t.price || 0);
+      }
+      const delta = yestToNow > 0 ? ((todayNet - yestToNow) / yestToNow) * 100 : null;
+      const refundRate = weekRevenue > 0 ? (weekRefunds / weekRevenue) * 100 : 0;
+
+      const kpi = (label, value, sub, subClass) =>
+        '<div class="kpi"><div class="k-label">' + label + '</div>' +
+        '<div class="k-value">' + value + '</div>' +
+        (sub ? '<div class="k-sub ' + (subClass || '') + '">' + sub + '</div>' : '') + '</div>';
+
+      const primary = '<div class="kpi primary"><div class="k-label">Today</div>' +
+        '<div class="k-value">' + formatCurrency(todayNet) + '</div>' +
+        '<div class="k-sub">' + todayCount + ' event' + (todayCount !== 1 ? 's' : '') + '</div></div>';
+
+      const vsYest = delta !== null
+        ? (delta >= 0 ? '↑ ' : '↓ ') + Math.abs(delta).toFixed(0) + '% vs yest'
+        : 'no data yest';
+      const vsYestClass = delta === null ? '' : (delta >= 0 ? 'up' : 'down');
+
+      return '<div class="kpis">' +
+        primary +
+        kpi("vs Yesterday", formatCurrencyCompact(yestToNow), vsYest, vsYestClass) +
+        kpi("Trial → Paid 7d", weekConv.toString(), "conversions") +
+      '</div>';
+    }
+
     function truncateId(id) {
       if (!id) return "";
-      return id.length > 24 ? id.slice(-12) : id;
+      return id.length > 24 ? id.slice(-10) : id;
     }
 
     function renderTx(tx) {
@@ -211,9 +333,20 @@
         : appName.charAt(0);
       const userId = tx.app_user_id || "";
       const idHtml = userId
-        ? '<div class="tx-id" onclick="copyTxId(\'' + userId.replace(/'/g, "\\'") + '\', this)" title="Click to copy App User ID">' + truncateId(userId) + ' \u2398</div>'
+        ? '<div class="tx-id" onclick="copyTxId(\'' + userId.replace(/'/g, "\\'") + '\', this, event)" title="Click to copy App User ID">' + truncateId(userId) + '</div>'
         : "";
-      return '<div class="tx-card"><div class="tx-left"><div class="tx-icon">' + iconHtml + '</div><div class="tx-info"><h3>' + appName + ' <span class="badge ' + type + '">' + label + '</span></h3><p>' + (tx.product_id || "\u2014") + (flag ? ' <span class="country-flag">' + flag + '</span>' : "") + ' \u00b7 ' + (tx.store || "") + '</p></div></div><div class="tx-right"><div class="tx-price">' + formatCurrency(tx.price, tx.currency) + '</div><div class="tx-time">' + formatExactTime(ts) + ' \u00b7 ' + timeAgo(ts) + '</div>' + idHtml + '</div></div>';
+      // Compact info line: trial→paid label (or country flag for renewals where label is redundant)
+      const showLabel = type === "trial_to_paid" || type === "new_subscription" || type === "one_time_purchase";
+      const subline = (showLabel ? label + ' · ' : '') + (tx.product_id || "—") + (flag ? ' ' + flag : "");
+      // Price color by type
+      let priceCls = "tx-price";
+      if (type === "refund") priceCls += " refund";
+      else if (type === "renewal") priceCls += " renewal";
+      return '<div class="tx-card">' +
+          '<div class="tx-icon">' + iconHtml + '</div>' +
+          '<div class="tx-info"><h3>' + appName + '</h3><p>' + subline + '</p></div>' +
+          '<div class="tx-right"><div class="' + priceCls + '">' + formatCurrency(tx.price) + '</div><div class="tx-time">' + formatTime(ts) + ' · ' + timeAgo(ts) + '</div>' + idHtml + '</div>' +
+        '</div>';
     }
 
     function getFilteredTxs() {
@@ -223,49 +356,91 @@
       return txs;
     }
 
+    function renderColumns(txs) {
+      const conv = txs.filter(t => CONVERSION_TYPES.has(t.transaction_type));
+      const renew = txs.filter(t => t.transaction_type === "renewal");
+      const refund = txs.filter(t => t.transaction_type === "refund");
+
+      const colHtml = (cls, title, items) => {
+        const sum = items.reduce((s, t) => s + (t.price || 0), 0);
+        const body = items.length
+          ? items.map(renderTx).join("")
+          : '<div class="empty-col">None today</div>';
+        return '<div class="col">' +
+          '<div class="col-header">' +
+            '<span class="col-title ' + cls + '">' + title + '</span>' +
+            '<span class="col-totals"><span class="amt">' + formatCurrency(sum) + '</span><span class="cnt">' + items.length + '</span></span>' +
+          '</div>' +
+          body +
+        '</div>';
+      };
+
+      // Hide refund column if zero on slow days (saves space)
+      const hideRefunds = refund.length === 0;
+      const wrap = hideRefunds ? '<div class="columns no-refunds">' : '<div class="columns">';
+      return wrap +
+        colHtml("conv", "Conversions", conv) +
+        colHtml("renew", "Renewals", renew) +
+        (hideRefunds ? "" : colHtml("refund", "Refunds", refund)) +
+      '</div>';
+    }
+
+    function renderDayHeader(label, txs) {
+      const s = summarize(txs);
+      const parts = [];
+      if (s.convCount) parts.push('<span class="b-conv">' + s.convCount + ' conv</span>');
+      if (s.renewCount) parts.push('<span class="b-renew">' + s.renewCount + ' renew</span>');
+      if (s.refundCount) parts.push('<span class="b-refund">' + s.refundCount + ' refund</span>');
+      const breakdown = parts.length ? '<span class="breakdown">' + parts.join("") + '</span>' : "";
+      return '<div class="day-header"><span class="day-label">' + label + '</span>' +
+        '<span class="day-summary">' + formatCurrency(s.net) + breakdown + '</span></div>';
+    }
+
     function renderAll() {
       const container = document.getElementById("container");
       const filtered = getFilteredTxs();
 
-      if (filtered.length === 0) {
-        const msg = viewMode === "live"
-          ? '<div class="empty-state"><h2>No transactions today</h2><p>Switch to History to see past transactions.</p></div>'
-          : '<div class="empty-state"><h2>No transactions yet</h2><p>Transactions will appear here as they come in from Superwall.</p></div>';
-        container.innerHTML = msg;
+      if (viewMode === "live") {
+        let html = renderKpis();
+        if (filtered.length === 0) {
+          html += '<div class="empty-state"><h2>No transactions today</h2><p>Switch to History to see past transactions.</p></div>';
+        } else {
+          html += renderColumns(filtered);
+        }
+        container.innerHTML = html;
         return;
       }
 
-      if (viewMode === "history") {
-        const groups = {};
-        const groupOrder = [];
-        filtered.forEach(tx => {
-          const key = getDayKey(getTxDate(tx));
-          if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
-          groups[key].push(tx);
-        });
-        let html = "";
-        groupOrder.forEach(key => {
-          html += renderDayHeader(getDayLabel(key), groups[key]);
-          html += groups[key].map(renderTx).join("");
-        });
-        if (lastDoc && allTxs.length >= PAGE_SIZE) {
-          html += '<button class="show-more" id="loadMore">Show more</button>';
-        }
-        container.innerHTML = html;
-        const btn = document.getElementById("loadMore");
-        if (btn) btn.addEventListener("click", loadMore);
-      } else {
-        let html = renderDayHeader("Today", filtered);
-        html += filtered.map(renderTx).join("");
-        container.innerHTML = html;
+      // History
+      if (filtered.length === 0) {
+        container.innerHTML = '<div class="empty-state"><h2>No transactions yet</h2><p>Transactions will appear here as they come in.</p></div>';
+        return;
       }
+      const groups = {};
+      const groupOrder = [];
+      filtered.forEach(tx => {
+        const key = getDayKey(getTxDate(tx));
+        if (!groups[key]) { groups[key] = []; groupOrder.push(key); }
+        groups[key].push(tx);
+      });
+      let html = renderKpis();
+      groupOrder.forEach(key => {
+        html += renderDayHeader(getDayLabel(key), groups[key]);
+        html += renderColumns(groups[key]);
+      });
+      if (lastDoc && allTxs.length >= PAGE_SIZE) {
+        html += '<button class="show-more" id="loadMore">Show more</button>';
+      }
+      container.innerHTML = html;
+      const btn = document.getElementById("loadMore");
+      if (btn) btn.addEventListener("click", loadMore);
     }
 
     function updateFilters() {
       allTxs.forEach(t => { if (t.app_name) knownApps.add(t.app_name); });
       const filtersEl = document.getElementById("filters");
       const apps = Array.from(knownApps).sort();
-      filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All Apps</button>' +
+      filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All</button>' +
         apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
       filtersEl.querySelectorAll(".filter-btn").forEach(btn => {
         btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateFilters(); renderAll(); });
