@@ -170,12 +170,19 @@ async function fetchSwStats(appId) {
   const appFilter = appId ? "AND applicationId = " + Number(appId) : "";
 
   // Cohort-by-trial-start: matches Superwall Charts methodology.
-  // Trial starts filtered to paywall-originated trials only (paywallId > 0) — Charts note:
-  // "only includes trials started on a Superwall paywall".
-  // Outcomes (conversions/cancellations/billing_issues) are joined via originalTransactionId
-  // so they attribute to the trial-start day, not the event day.
-  // Outcome lookup window extends 7d past today() to capture late conversions of trials
-  // started in the 14-day cohort window.
+  // - Trial starts: paywall-originated trials only (paywallId > 0); Charts notes
+  //   "only includes trials started on a Superwall paywall".
+  // - Outcomes joined via originalTransactionId so they attribute to trial-start day.
+  // - Each trial gets EXACTLY ONE terminal status by priority:
+  //   1. renewal (= conversion to paid; periodType is NORMAL but isTrialConversion=1)
+  //   2. cancellation (TRIAL periodType)
+  //   3. billing_issue (TRIAL periodType)
+  //   4. expiration (TRIAL periodType)
+  //   5. pending (no terminal event yet)
+  //   Cancellation supersedes billing_issue supersedes expiration since users often
+  //   accumulate multiple events as a trial winds down.
+  // - Lookup window extends 7d past today() to capture late events of trials started
+  //   in the 14-day cohort window.
   const eventsSql = `
 WITH trials AS (
   SELECT
@@ -193,23 +200,41 @@ WITH trials AS (
 outcomes AS (
   SELECT
     originalTransactionId AS otid,
-    name AS oname,
-    periodType AS optype
+    name AS oname
   FROM open_revenue.attributed_events_by_ts_rep
   WHERE isSandbox = 0
     ${appFilter}
-    AND name IN ('renewal','cancellation','billing_issue')
+    AND (
+      (name = 'renewal' AND isTrialConversion = 1)
+      OR (name IN ('cancellation','billing_issue','expiration') AND lower(periodType) = 'trial')
+    )
     AND ts >= today() - 13
     AND ts < today() + 8
+),
+per_trial AS (
+  SELECT
+    trials.otid AS otid,
+    trials.trial_day AS day,
+    argMin(outcomes.oname, multiIf(
+      outcomes.oname = 'renewal', 1,
+      outcomes.oname = 'cancellation', 2,
+      outcomes.oname = 'billing_issue', 3,
+      outcomes.oname = 'expiration', 4,
+      99
+    )) AS status
+  FROM trials
+  LEFT JOIN outcomes ON trials.otid = outcomes.otid
+  GROUP BY trials.otid, trials.trial_day
 )
 SELECT
-  trials.trial_day AS day,
-  uniq(trials.otid) AS trial_starts,
-  uniqIf(trials.otid, outcomes.oname = 'renewal') AS trial_conversions,
-  uniqIf(trials.otid, outcomes.oname = 'cancellation' AND lower(outcomes.optype) = 'trial') AS trial_cancellations,
-  uniqIf(trials.otid, outcomes.oname = 'billing_issue' AND lower(outcomes.optype) = 'trial') AS in_billing_retry
-FROM trials
-LEFT JOIN outcomes ON trials.otid = outcomes.otid
+  day,
+  count() AS trial_starts,
+  countIf(status = 'renewal') AS trial_conversions,
+  countIf(status = 'cancellation') AS trial_cancellations,
+  countIf(status = 'billing_issue') AS in_billing_retry,
+  countIf(status = 'expiration') AS trial_expirations,
+  countIf(status = '' OR status IS NULL) AS pending_trials
+FROM per_trial
 GROUP BY day
 ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
@@ -327,12 +352,16 @@ FORMAT JSONEachRow`.trim();
     const tc = Number(e.trial_conversions || 0);
     const tcn = Number(e.trial_cancellations || 0);
     const ibr = Number(e.in_billing_retry || 0);
+    const exp = Number(e.trial_expirations || 0);
+    const pend = Number(e.pending_trials || 0);
     return {
       day,
       trial_starts: ts,
       trial_conversions: tc,
       trial_cancellations: tcn,
       in_billing_retry: ibr,
+      trial_expirations: exp,
+      pending_trials: pend,
       ttp: pct(tc, ts),
       cancellation_rate: pct(tcn, ts),
       billing_issue_rate: pct(ibr, ts),
