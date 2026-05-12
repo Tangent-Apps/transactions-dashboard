@@ -102,3 +102,42 @@ functions.http("swWebhook", async (req, res) => {
     return res.status(500).send("Error: " + err.message);
   }
 });
+
+// Dashboard login: POST { password } → { token } (Firebase custom token)
+functions.http("dashboardAuth", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "http://localhost:5173",
+    "http://localhost:8000",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "POST") return res.status(405).send("Not allowed");
+
+  try {
+    const expected = process.env.DASHBOARD_PASSWORD;
+    if (!expected) return res.status(500).send("Server misconfigured");
+
+    const submitted = (req.body && req.body.password) || "";
+    if (typeof submitted !== "string" || submitted.length > 256) {
+      return res.status(400).send("Bad request");
+    }
+    if (submitted !== expected) {
+      return res.status(401).json({ error: "Invalid password" });
+    }
+
+    const uid = "dashboard-viewer";
+    const token = await admin.auth().createCustomToken(uid, { dashboard: true });
+    return res.status(200).json({ token });
+  } catch (err) {
+    console.error("dashboardAuth error:", err.message);
+    return res.status(500).send("Error");
+  }
+});

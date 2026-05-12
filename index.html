@@ -131,12 +131,26 @@
   </div>
 
   <div class="container" id="container">
-    <div class="loading">Loading transactions...</div>
+    <div class="loading">Authenticating...</div>
+  </div>
+
+  <!-- Login overlay -->
+  <div id="loginOverlay" style="display:none; position:fixed; inset:0; background:#0f0f0f; z-index:100; display:flex; align-items:center; justify-content:center;">
+    <form id="loginForm" style="background:#1a1a1a; border:1px solid #2a2a2a; border-radius:12px; padding:28px; width:320px; max-width:90vw;">
+      <h2 style="font-size:16px; color:#fff; margin-bottom:6px;">Dashboard login</h2>
+      <p style="font-size:12px; color:#777; margin-bottom:16px;">Internal Tangent tool.</p>
+      <input id="pwInput" type="password" placeholder="Password" autocomplete="current-password"
+        style="width:100%; padding:10px 12px; background:#0f0f0f; border:1px solid #2a2a2a; border-radius:8px; color:#fff; font-size:14px; margin-bottom:10px; box-sizing:border-box;">
+      <div id="loginErr" style="color:#f87171; font-size:12px; margin-bottom:10px; min-height:14px;"></div>
+      <button type="submit" id="loginBtn"
+        style="width:100%; padding:10px; background:#fff; color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer;">Sign in</button>
+    </form>
   </div>
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getFirestore, collection, query, where, orderBy, limit, startAfter, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { getAuth, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyCnfHM5rp-p1wuEMN2BPE4koLrp9WqcQ_c",
@@ -148,6 +162,70 @@
     };
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
+    const auth = getAuth(app);
+
+    const DASHBOARD_AUTH_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/dashboardAuth";
+
+    const overlay = document.getElementById("loginOverlay");
+    const loginForm = document.getElementById("loginForm");
+    const pwInput = document.getElementById("pwInput");
+    const loginErr = document.getElementById("loginErr");
+    const loginBtn = document.getElementById("loginBtn");
+
+    function showLogin() {
+      overlay.style.display = "flex";
+      pwInput.focus();
+    }
+    function hideLogin() {
+      overlay.style.display = "none";
+    }
+
+    async function tryLogin(password) {
+      const r = await fetch(DASHBOARD_AUTH_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!r.ok) throw new Error(r.status === 401 ? "Wrong password" : "Login failed");
+      const { token } = await r.json();
+      await signInWithCustomToken(auth, token);
+      sessionStorage.setItem("dash_pw", password);
+    }
+
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      loginErr.textContent = "";
+      loginBtn.disabled = true;
+      loginBtn.textContent = "Signing in...";
+      try {
+        await tryLogin(pwInput.value);
+        hideLogin();
+      } catch (err) {
+        loginErr.textContent = err.message;
+        sessionStorage.removeItem("dash_pw");
+      } finally {
+        loginBtn.disabled = false;
+        loginBtn.textContent = "Sign in";
+      }
+    });
+
+    // Boot: if cached pw, try silent login; else show overlay
+    (async () => {
+      const cached = sessionStorage.getItem("dash_pw");
+      if (cached) {
+        try { await tryLogin(cached); return; }
+        catch { sessionStorage.removeItem("dash_pw"); }
+      }
+      showLogin();
+    })();
+
+    let booted = false;
+    onAuthStateChanged(auth, (user) => {
+      if (user && !booted) {
+        booted = true;
+        startDashboard();
+      }
+    });
 
     const SNAPSHOT_SIZE = 200;
     const PAGE_SIZE = 50;
@@ -470,7 +548,9 @@
       });
     }
 
-    startListening();
+    function startDashboard() {
+      startListening();
+    }
   </script>
 </body>
 </html>
