@@ -94,8 +94,10 @@ functions.http("swWebhook", async (req, res) => {
       }
     }
 
-    // Recovery detection: paid renewal whose immediate predecessor was billing_issue
-    // (same originalTransactionId). Query last event before this one.
+    // Recovery detection: paid renewal where a billing_issue occurred between
+    // the most-recent prior paid event (renewal | new_subscription | trial_to_paid)
+    // and now. Captures grace-period recoveries where expiration fires between
+    // billing_issue and the eventual successful renewal.
     let recoveredFromBilling = false;
     if (tt === "renewal" && data.originalTransactionId) {
       try {
@@ -103,14 +105,26 @@ functions.http("swWebhook", async (req, res) => {
           .where("original_transaction_id", "==", data.originalTransactionId)
           .where("is_sandbox", "==", data.environment === "SANDBOX")
           .orderBy("received_at", "desc")
-          .limit(1)
+          .limit(50) // recent history; cheap, all small docs
           .get();
-        if (!prevSnap.empty) {
-          const prev = prevSnap.docs[0].data();
-          if (prev.transaction_type === "billing_issue") {
-            recoveredFromBilling = true;
+
+        // Walk forward in time (oldest first) and find:
+        //  - most recent prior "paid anchor" (renewal | new_subscription | trial_to_paid)
+        //  - any billing_issue after that anchor
+        let anchorTs = 0;
+        let hasBillingIssueAfterAnchor = false;
+        const docs = prevSnap.docs.slice().reverse(); // ascending received_at
+        for (const d of docs) {
+          const dd = d.data();
+          const ts = dd.received_at && dd.received_at.toMillis ? dd.received_at.toMillis() : 0;
+          if (["renewal", "new_subscription", "trial_to_paid"].includes(dd.transaction_type)) {
+            anchorTs = ts;
+            hasBillingIssueAfterAnchor = false; // reset on new anchor
+          } else if (dd.transaction_type === "billing_issue" && ts > anchorTs) {
+            hasBillingIssueAfterAnchor = true;
           }
         }
+        recoveredFromBilling = hasBillingIssueAfterAnchor;
       } catch (e) {
         console.warn("recovery lookup failed:", e.message);
       }
