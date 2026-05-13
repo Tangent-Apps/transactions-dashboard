@@ -71,7 +71,9 @@
     .col-totals .cnt { font-size: 10px; color: #777; }
 
     /* Tx cards inside columns — compact */
-    .tx-card { background: #1a1a1a; border: 1px solid #232323; border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; transition: background 0.15s; display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; }
+    .tx-card { background: #1a1a1a; border: 1px solid #232323; border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; transition: background 0.15s; display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; position: relative; overflow: hidden; }
+    .tx-card.recovered { border-left: 3px solid #4ade80; padding-left: 10px; }
+    .tx-card.recovered::after { content: "RECOVERED"; position: absolute; top: 4px; right: 8px; font-size: 9px; font-weight: 700; letter-spacing: 0.6px; color: #4ade80; background: rgba(74, 222, 128, 0.12); padding: 2px 6px; border-radius: 3px; pointer-events: none; }
     .tx-card:hover { background: #1f1f1f; }
     .tx-card:last-child { margin-bottom: 0; }
     .tx-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; overflow: hidden; background: #2a2a2a; color: #aaa; }
@@ -83,7 +85,6 @@
     .tx-price { font-size: 14px; font-weight: 700; color: #4ade80; line-height: 1.2; }
     .tx-price.refund { color: #f5a07a; }
     .tx-price.renewal { color: #c084fc; }
-    .recovery-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; background: #1e3a2a; color: #4ade80; font-size: 10px; font-weight: 600; margin-left: 6px; vertical-align: middle; }
     .tx-time { font-size: 10px; color: #666; margin-top: 2px; }
     .tx-id { font-size: 9px; color: #444; font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; margin-top: 2px; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; }
     .tx-card:hover .tx-id { opacity: 1; }
@@ -524,13 +525,13 @@
         : "";
       // Compact info line: trial→paid label (or country flag for renewals where label is redundant)
       const showLabel = type === "trial_to_paid" || type === "new_subscription" || type === "one_time_purchase";
-      const recoveryBadge = tx.recovered_from_billing ? ' <span class="recovery-badge" title="Renewal after billing retry — recovered subscription">↻ recovered</span>' : '';
-      const subline = (showLabel ? label + ' · ' : '') + (tx.product_id || "—") + (flag ? ' ' + flag : "") + recoveryBadge;
+      const subline = (showLabel ? label + ' · ' : '') + (tx.product_id || "—") + (flag ? ' ' + flag : "");
       // Price color by type
       let priceCls = "tx-price";
       if (type === "refund") priceCls += " refund";
       else if (type === "renewal") priceCls += " renewal";
-      return '<div class="tx-card">' +
+      const cardCls = "tx-card" + (tx.recovered_from_billing ? " recovered" : "");
+      return '<div class="' + cardCls + '" ' + (tx.recovered_from_billing ? 'title="Renewal after billing retry — subscription recovered"' : '') + '>' +
           '<div class="tx-icon">' + iconHtml + '</div>' +
           '<div class="tx-info"><h3>' + appName + '</h3><p>' + subline + '</p></div>' +
           '<div class="tx-right"><div class="' + priceCls + '">' + formatCurrency(tx.price) + '</div><div class="tx-time">' + formatTime(ts) + ' · ' + timeAgo(ts) + '</div>' + idHtml + '</div>' +
