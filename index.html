@@ -83,6 +83,7 @@
     .tx-price { font-size: 14px; font-weight: 700; color: #4ade80; line-height: 1.2; }
     .tx-price.refund { color: #f5a07a; }
     .tx-price.renewal { color: #c084fc; }
+    .recovery-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; background: #1e3a2a; color: #4ade80; font-size: 10px; font-weight: 600; margin-left: 6px; vertical-align: middle; }
     .tx-time { font-size: 10px; color: #666; margin-top: 2px; }
     .tx-id { font-size: 9px; color: #444; font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; margin-top: 2px; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; }
     .tx-card:hover .tx-id { opacity: 1; }
@@ -238,6 +239,9 @@
     let knownApps = new Set();
 
     const CONVERSION_TYPES = new Set(["new_subscription", "trial_to_paid", "one_time_purchase"]);
+    // Visible tx types (others like billing_issue/cancellation/expiration are stored for
+    // recovery detection but hidden from the dashboard UI).
+    const VISIBLE_TYPES = new Set(["new_subscription", "trial_to_paid", "one_time_purchase", "renewal", "refund"]);
 
     // Superwall app_name → applicationId (iOS by default). Stripe/Android variants merged best-effort.
     const SW_APP_IDS = {
@@ -520,7 +524,8 @@
         : "";
       // Compact info line: trial→paid label (or country flag for renewals where label is redundant)
       const showLabel = type === "trial_to_paid" || type === "new_subscription" || type === "one_time_purchase";
-      const subline = (showLabel ? label + ' · ' : '') + (tx.product_id || "—") + (flag ? ' ' + flag : "");
+      const recoveryBadge = tx.recovered_from_billing ? ' <span class="recovery-badge" title="Renewal after billing retry — recovered subscription">↻ recovered</span>' : '';
+      const subline = (showLabel ? label + ' · ' : '') + (tx.product_id || "—") + (flag ? ' ' + flag : "") + recoveryBadge;
       // Price color by type
       let priceCls = "tx-price";
       if (type === "refund") priceCls += " refund";
@@ -644,7 +649,10 @@
       const q = query(collection(db, "transactions"), where("is_sandbox", "==", false), orderBy("received_at", "desc"), limit(SNAPSHOT_SIZE));
       onSnapshot(q, (snapshot) => {
         allTxs = [];
-        snapshot.forEach(doc => allTxs.push(doc.data()));
+        snapshot.forEach(doc => {
+          const d = doc.data();
+          if (VISIBLE_TYPES.has(d.transaction_type)) allTxs.push(d);
+        });
         lastDoc = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
         updateFilters(); renderAll();
       }, (err) => {

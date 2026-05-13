@@ -64,8 +64,36 @@ functions.http("swWebhook", async (req, res) => {
       }
     } else if (type === "non_renewing_purchase") {
       tt = "one_time_purchase";
+    } else if (type === "billing_issue") {
+      tt = "billing_issue";
+    } else if (type === "cancellation") {
+      tt = "cancellation";
+    } else if (type === "expiration") {
+      tt = "expiration";
     } else {
       return res.status(200).send("Ignored");
+    }
+
+    // Recovery detection: paid renewal whose immediate predecessor was billing_issue
+    // (same originalTransactionId). Query last event before this one.
+    let recoveredFromBilling = false;
+    if (tt === "renewal" && data.originalTransactionId) {
+      try {
+        const prevSnap = await db.collection("transactions")
+          .where("original_transaction_id", "==", data.originalTransactionId)
+          .where("is_sandbox", "==", data.environment === "SANDBOX")
+          .orderBy("received_at", "desc")
+          .limit(1)
+          .get();
+        if (!prevSnap.empty) {
+          const prev = prevSnap.docs[0].data();
+          if (prev.transaction_type === "billing_issue") {
+            recoveredFromBilling = true;
+          }
+        }
+      } catch (e) {
+        console.warn("recovery lookup failed:", e.message);
+      }
     }
 
     const tx = {
@@ -88,6 +116,7 @@ functions.http("swWebhook", async (req, res) => {
       app_user_id: data.originalAppUserId || "",
       original_transaction_id: data.originalTransactionId || "",
       is_sandbox: data.environment === "SANDBOX",
+      recovered_from_billing: recoveredFromBilling,
     };
 
     await db.collection("transactions").add(tx);
