@@ -656,6 +656,20 @@
     function startDashboard() {
       startListening();
       fetchSwStats();
+      startSwStatsPolling();
+    }
+
+    // Refresh Superwall KPIs every 30min while tab visible, plus once on tab-return.
+    // Skips polls when tab hidden (saves ClickHouse queries).
+    const SW_POLL_INTERVAL_MS = 30 * 60 * 1000;
+    function startSwStatsPolling() {
+      setInterval(() => {
+        if (document.hidden) return;
+        fetchSwStats();
+      }, SW_POLL_INTERVAL_MS);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) fetchSwStats();
+      });
     }
   </script>
 </body>
