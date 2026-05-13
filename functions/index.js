@@ -32,23 +32,18 @@ function resolveAppName(appId, productId) {
 functions.http("swWebhook", async (req, res) => {
   if (req.method !== "POST") return res.status(405).send("Not allowed");
   try {
-    // Verify Superwall signature using Svix
-    const secret = process.env.SUPERWALL_WEBHOOK_SECRET;
-    if (!secret) return res.status(500).send("Missing webhook secret");
-
-    const wh = new Webhook(secret);
-    let payload;
-    try {
-      payload = wh.verify(req.rawBody, {
-        "svix-id": req.headers["svix-id"],
-        "svix-timestamp": req.headers["svix-timestamp"],
-        "svix-signature": req.headers["svix-signature"],
-      });
-    } catch (verifyErr) {
-      console.warn("Signature verification failed:", verifyErr.message);
+    // Superwall sends shared secret via configured custom header `x-webhook-secret`.
+    // Each app's webhook in Superwall is configured with the same secret on the
+    // Tangent side (one secret in Secret Manager). Reject if missing/mismatch.
+    const expected = process.env.SUPERWALL_WEBHOOK_SECRET;
+    if (!expected) return res.status(500).send("Missing webhook secret");
+    const submitted = req.headers["x-webhook-secret"];
+    if (!submitted || submitted !== expected) {
+      console.warn("Webhook auth failed: header mismatch");
       return res.status(401).send("Invalid signature");
     }
 
+    const payload = req.body || {};
     const type = payload.type;
     const data = payload.data || {};
 
