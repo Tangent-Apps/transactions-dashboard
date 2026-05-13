@@ -16,6 +16,15 @@
         { "fieldPath": "is_sandbox", "order": "ASCENDING" },
         { "fieldPath": "received_at", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "transactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "original_transaction_id", "order": "ASCENDING" },
+        { "fieldPath": "transaction_type", "order": "ASCENDING" },
+        { "fieldPath": "purchased_at_ms", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

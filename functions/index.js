@@ -74,6 +74,26 @@ functions.http("swWebhook", async (req, res) => {
       return res.status(200).send("Ignored");
     }
 
+    // Dedupe: Superwall retries failed webhooks, and we backfilled some events
+    // from ClickHouse on 2026-05-13. Skip if same (originalTransactionId,
+    // purchased_at_ms, transaction_type) already in Firestore.
+    const purchasedAtMs = data.purchasedAt ? new Date(data.purchasedAt).getTime() : null;
+    if (data.originalTransactionId && purchasedAtMs) {
+      try {
+        const dupSnap = await db.collection("transactions")
+          .where("original_transaction_id", "==", data.originalTransactionId)
+          .where("transaction_type", "==", tt)
+          .where("purchased_at_ms", "==", purchasedAtMs)
+          .limit(1)
+          .get();
+        if (!dupSnap.empty) {
+          return res.status(200).send("Duplicate (already stored)");
+        }
+      } catch (e) {
+        console.warn("dedupe lookup failed:", e.message);
+      }
+    }
+
     // Recovery detection: paid renewal whose immediate predecessor was billing_issue
     // (same originalTransactionId). Query last event before this one.
     let recoveredFromBilling = false;
