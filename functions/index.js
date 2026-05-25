@@ -15,6 +15,12 @@ function resolveAppName(appId, productId) {
   if (id.includes("hola")) return "Hola";
   if (id.includes("stretch")) return "Better Stretch";
   if (id.includes("poly")) return "Poly AI";
+  if (id.includes("quitalcohol") || id.includes("quit_alcohol") || id.includes("quitalc")) return "Quit Alcohol";
+  if (id.includes("dora") || id.includes("speaklearnspanish") || id.includes("speak_learn_spanish")) return "Speak & Learn Spanish: Dora";
+  if (id.includes("yarn")) return "Yarn Ai";
+  if (id.includes("babyfood") || id.includes("baby_food")) return "Baby Food Scan";
+  if (id.includes("betterbreath") || id.includes("better_breath")) return "Better Breath";
+  if (id.includes("betterwalk") || id.includes("better_walk")) return "Better Walk";
   if (id.includes("girlies") || id.includes("therapy")) return "GirlTalk";
   if (id.includes("prayer")) return "Prayer";
   if (id.includes("mew")) return "Mew";
@@ -224,6 +230,13 @@ async function swQuery(sql) {
 // land 3 days later. So "today's" TTP/cancel/billing for cohort started 3 days ago.
 const TRIAL_LAG_DAYS = 3;
 
+// ITP lag — install → paywall → trial (~same day) → 3d trial → paid conversion.
+// Need ~6 days minimum to mature. events_rep app_install capped at 7 days so cohort
+// window is tight: lag=6 means we can only show cohort day = today-6.
+// To show 7-day series, we cohort-anchor on (today-6 down to today-12) but that
+// exceeds events_rep retention. Compromise: 6-day lag, single most-recent ITP value.
+const ITP_LAG_DAYS = 6;
+
 async function fetchSwStats(appId) {
   const appFilter = appId ? "AND applicationId = " + Number(appId) : "";
 
@@ -345,9 +358,55 @@ GROUP BY day
 ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
 
-  const [events, funnel] = await Promise.all([
+  // Install to Paid (ITP): cohort by install_day.
+  // - Denominator: distinct users with an attribution row whose installDate falls in day d.
+  //   (Approximation of Superwall Charts' "New Users"; uses attributed_events_by_ts_rep
+  //   which has long retention, unlike events_rep app_install capped at 7d.)
+  // - Numerator: of those users, the subset with a paid outcome:
+  //     - initial_purchase non-trial (direct paid)
+  //     - renewal with isTrialConversion=1 (trial → paid)
+  // - Cohort window: today-13 to today-(ITP_LAG_DAYS+1) so each cohort day has had
+  //   ITP_LAG_DAYS of maturation time.
+  const itpSql = `
+WITH cohort AS (
+  SELECT
+    toDate(installDate, 'UTC') AS day,
+    appUserId AS uid
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND appUserId IS NOT NULL
+    AND appUserId != ''
+    AND installDate >= today() - 13
+    AND installDate < today() - ${ITP_LAG_DAYS - 1}
+),
+paid AS (
+  SELECT DISTINCT appUserId AS uid
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE isSandbox = 0
+    ${appFilter}
+    AND appUserId IS NOT NULL
+    AND (
+      (name = 'initial_purchase' AND lower(periodType) != 'trial')
+      OR (name = 'renewal' AND isTrialConversion = 1)
+    )
+    AND ts >= today() - 14
+    AND ts < today() + 1
+)
+SELECT
+  c.day AS day,
+  uniq(c.uid) AS new_users,
+  uniqIf(c.uid, p.uid IS NOT NULL AND p.uid != '') AS paid_users
+FROM cohort c
+LEFT JOIN paid p ON c.uid = p.uid
+GROUP BY day
+ORDER BY day ASC
+FORMAT JSONEachRow`.trim();
+
+  const [events, funnel, itp] = await Promise.all([
     swQuery(eventsSql),
     swQuery(funnelSql),
+    swQuery(itpSql),
   ]);
 
   // Build map by day string YYYY-MM-DD
@@ -355,6 +414,8 @@ FORMAT JSONEachRow`.trim();
   for (const r of events) evMap.set(r.day, r);
   const fnMap = new Map();
   for (const r of funnel) fnMap.set(r.day, r);
+  const itpMap = new Map();
+  for (const r of itp) itpMap.set(r.day, r);
 
   function dStr(d) {
     const y = d.getUTCFullYear();
@@ -387,6 +448,7 @@ FORMAT JSONEachRow`.trim();
 
   const trialDays = buildSeries(TRIAL_LAG_DAYS); // for TTP, cancel%, billing%
   const funnelDays = buildSeries(0);             // for ITT, paywall rate
+  const itpDays = buildSeries(ITP_LAG_DAYS);     // for ITP
 
   // For each trial day d:
   //   trial_starts on d → cohort. After lag, observe their conversions/cancellations/billing-issues.
@@ -441,11 +503,25 @@ FORMAT JSONEachRow`.trim();
     };
   });
 
+  const itpSeries = itpDays.map(day => {
+    const r = itpMap.get(day) || {};
+    const nu = Number(r.new_users || 0);
+    const pu = Number(r.paid_users || 0);
+    return {
+      day,
+      new_users: nu,
+      paid_users: pu,
+      itp: pct(pu, nu),
+    };
+  });
+
   // "Today" and "yesterday" headline values = the most recent day in each series
   const trialToday = trialSeries[trialSeries.length - 1];
   const trialYest = trialSeries[trialSeries.length - 2];
   const funnelToday = funnelSeries[funnelSeries.length - 1];
   const funnelYest = funnelSeries[funnelSeries.length - 2];
+  const itpToday = itpSeries[itpSeries.length - 1];
+  const itpYest = itpSeries[itpSeries.length - 2];
 
   return {
     today: {
@@ -454,6 +530,7 @@ FORMAT JSONEachRow`.trim();
       cancellationRate: trialToday.cancellation_rate,
       billingIssueRate: trialToday.billing_issue_rate,
       paywallRate: funnelToday.paywall_rate,
+      itpRate: itpToday.itp,
       counts: {
         trial_starts: trialToday.trial_starts,
         trial_conversions: trialToday.trial_conversions,
@@ -462,6 +539,8 @@ FORMAT JSONEachRow`.trim();
         new_users: funnelToday.new_users,
         converted_users: funnelToday.converted_users,
         paywalled_users: funnelToday.paywalled_users,
+        itp_new_users: itpToday.new_users,
+        itp_paid_users: itpToday.paid_users,
       },
     },
     yest: {
@@ -470,6 +549,7 @@ FORMAT JSONEachRow`.trim();
       cancellationRate: trialYest.cancellation_rate,
       billingIssueRate: trialYest.billing_issue_rate,
       paywallRate: funnelYest.paywall_rate,
+      itpRate: itpYest.itp,
       counts: {
         trial_starts: trialYest.trial_starts,
         trial_conversions: trialYest.trial_conversions,
@@ -478,10 +558,13 @@ FORMAT JSONEachRow`.trim();
         new_users: funnelYest.new_users,
         converted_users: funnelYest.converted_users,
         paywalled_users: funnelYest.paywalled_users,
+        itp_new_users: itpYest.new_users,
+        itp_paid_users: itpYest.paid_users,
       },
     },
-    series: { trial: trialSeries, funnel: funnelSeries },
+    series: { trial: trialSeries, funnel: funnelSeries, itp: itpSeries },
     trialLagDays: TRIAL_LAG_DAYS,
+    itpLagDays: ITP_LAG_DAYS,
   };
 }
 
