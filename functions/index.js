@@ -230,12 +230,10 @@ async function swQuery(sql) {
 // land 3 days later. So "today's" TTP/cancel/billing for cohort started 3 days ago.
 const TRIAL_LAG_DAYS = 3;
 
-// ITP lag — install → paywall → trial (~same day) → 3d trial → paid conversion.
-// Need ~6 days minimum to mature. events_rep app_install capped at 7 days so cohort
-// window is tight: lag=6 means we can only show cohort day = today-6.
-// To show 7-day series, we cohort-anchor on (today-6 down to today-12) but that
-// exceeds events_rep retention. Compromise: 6-day lag, single most-recent ITP value.
-const ITP_LAG_DAYS = 6;
+// ITP lag — install → paywall → trial → 3d trial → paid.
+// events_rep.app_install capped at 7d so cohort window is constrained.
+// Use 4-day lag: catches most trial-to-paid conversions while still giving 3 mature days.
+const ITP_LAG_DAYS = 4;
 
 async function fetchSwStats(appId) {
   const appFilter = appId ? "AND applicationId = " + Number(appId) : "";
@@ -359,26 +357,22 @@ ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
 
   // Install to Paid (ITP): cohort by install_day.
-  // - Denominator: distinct users with an attribution row whose installDate falls in day d.
-  //   (Approximation of Superwall Charts' "New Users"; uses attributed_events_by_ts_rep
-  //   which has long retention, unlike events_rep app_install capped at 7d.)
-  // - Numerator: of those users, the subset with a paid outcome:
+  // - Denominator: distinct users with app_install event on day d (events_rep). Matches
+  //   ITT denom — true install count.
+  // - Numerator: of those users, the subset with a paid outcome anywhere:
   //     - initial_purchase non-trial (direct paid)
   //     - renewal with isTrialConversion=1 (trial → paid)
-  // - Cohort window: today-13 to today-(ITP_LAG_DAYS+1) so each cohort day has had
-  //   ITP_LAG_DAYS of maturation time.
+  // - Cohort window: today-6 to today-(ITP_LAG_DAYS) so each cohort day has had
+  //   ITP_LAG_DAYS of maturation time. Bounded by events_rep 7d cap.
   const itpSql = `
-WITH cohort AS (
-  SELECT
-    toDate(installDate, 'UTC') AS day,
-    appUserId AS uid
-  FROM open_revenue.attributed_events_by_ts_rep
+WITH installs AS (
+  SELECT DISTINCT toDate(ts, 'UTC') AS day, JSONExtractString(meta, 'appUserId') AS uid
+  FROM sw.events_rep
   WHERE isSandbox = 0
     ${appFilter}
-    AND appUserId IS NOT NULL
-    AND appUserId != ''
-    AND installDate >= today() - 13
-    AND installDate < today() - ${ITP_LAG_DAYS - 1}
+    AND name = 'app_install'
+    AND ts >= today() - 6
+    AND ts < today() - ${ITP_LAG_DAYS - 1}
 ),
 paid AS (
   SELECT DISTINCT appUserId AS uid
@@ -390,15 +384,15 @@ paid AS (
       (name = 'initial_purchase' AND lower(periodType) != 'trial')
       OR (name = 'renewal' AND isTrialConversion = 1)
     )
-    AND ts >= today() - 14
+    AND ts >= today() - 7
     AND ts < today() + 1
 )
 SELECT
-  c.day AS day,
-  uniq(c.uid) AS new_users,
-  uniqIf(c.uid, p.uid IS NOT NULL AND p.uid != '') AS paid_users
-FROM cohort c
-LEFT JOIN paid p ON c.uid = p.uid
+  i.day AS day,
+  uniq(i.uid) AS new_users,
+  uniqIf(i.uid, p.uid IS NOT NULL AND p.uid != '') AS paid_users
+FROM installs i
+LEFT JOIN paid p ON i.uid = p.uid
 GROUP BY day
 ORDER BY day ASC
 FORMAT JSONEachRow`.trim();
