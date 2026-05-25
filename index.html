@@ -637,7 +637,16 @@
         knownApps.add(t.app_name);
       });
       const filtersEl = document.getElementById("filters");
-      const apps = Array.from(knownApps).sort();
+      const priority = ["GirlTalk","GirlWalk","Poly AI","Christian Daily Task","Christian Daily Tasks","Christian Music","Christian Music AI"];
+      const rank = (a) => {
+        const i = priority.indexOf(a);
+        return i === -1 ? priority.length : i;
+      };
+      const apps = Array.from(knownApps).sort((a,b) => {
+        const ra = rank(a), rb = rank(b);
+        if (ra !== rb) return ra - rb;
+        return a.localeCompare(b);
+      });
       filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All</button>' +
         apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
       filtersEl.querySelectorAll(".filter-btn").forEach(btn => {
