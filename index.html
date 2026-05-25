@@ -629,7 +629,13 @@
     }
 
     function updateFilters() {
-      allTxs.forEach(t => { if (t.app_name) knownApps.add(t.app_name); });
+      allTxs.forEach(t => {
+        if (!t.app_name) return;
+        // Hide raw Stripe price IDs — backend bundles new ones as "Stripe Web",
+        // but legacy docs may still have the raw price_id as app_name.
+        if (/^(live:)?price_/.test(t.app_name)) return;
+        knownApps.add(t.app_name);
+      });
       const filtersEl = document.getElementById("filters");
       const apps = Array.from(knownApps).sort();
       filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All</button>' +

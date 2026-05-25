@@ -28,6 +28,10 @@ function resolveAppName(appId, productId) {
   if (id.includes("murder") || id.includes("mystery")) return "Murder Mystery";
   if (id.includes("reel") || id.includes("short_stories")) return "Reel Short Stories";
   if (id.includes("daily") && id.includes("prayer")) return "Daily Prayers";
+  // Stripe price IDs (web revenue, unmapped) — bucket together so dashboard isn't littered.
+  if (productId && (productId.startsWith("live:price_") || productId.startsWith("price_"))) {
+    return "Stripe Web";
+  }
   if (productId) {
     const s = productId.split(".");
     return s.length > 2 ? s[2] : productId;
