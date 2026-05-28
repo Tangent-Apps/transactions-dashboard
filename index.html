@@ -666,9 +666,21 @@
       updateFilters(); renderAll();
     }
 
+    let firstSnapshotDone = false;
     function startListening() {
       const q = query(collection(db, "transactions"), where("is_sandbox", "==", false), where("transaction_type", "in", VISIBLE_TYPES_ARR), orderBy("received_at", "desc"), limit(SNAPSHOT_SIZE));
       onSnapshot(q, (snapshot) => {
+        // Detect newly-added docs (skip initial load primer).
+        if (firstSnapshotDone) {
+          snapshot.docChanges().forEach(ch => {
+            if (ch.type === "added") {
+              const d = ch.doc.data();
+              if (VISIBLE_TYPES.has(d.transaction_type)) fireReward(d);
+            }
+          });
+        }
+        firstSnapshotDone = true;
+
         allTxs = [];
         snapshot.forEach(doc => allTxs.push(doc.data()));
         lastDoc = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
@@ -697,6 +709,220 @@
         if (!document.hidden) fetchSwStats();
       });
     }
+
+    // ============================================================
+    // REWARD SYSTEM — visual + audio on new conversion/renewal/refund
+    // ============================================================
+    let audioCtx = null;
+    let soundEnabled = localStorage.getItem("rewardSound") !== "off";
+
+    function getAudioCtx() {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+      }
+      if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+      return audioCtx;
+    }
+
+    // Cha-ching: two-tone bell with quick decay
+    function playChaChing(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const notes = [
+        { freq: 1318.51, start: 0,    dur: 0.18 }, // E6
+        { freq: 1567.98, start: 0.08, dur: 0.50 }, // G6
+      ];
+      notes.forEach(n => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.value = n.freq;
+        gain.gain.setValueAtTime(0, now + n.start);
+        gain.gain.linearRampToValueAtTime(volume, now + n.start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + n.start);
+        osc.stop(now + n.start + n.dur + 0.05);
+      });
+    }
+
+    // Soft coin ping
+    function playCoin(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(2093, now); // C7
+      osc.frequency.exponentialRampToValueAtTime(2637, now + 0.05); // E7
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(volume, now + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    }
+
+    // Sad descending trombone
+    function playSad(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.6);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(volume * 0.5, now + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.75);
+    }
+
+    // Confetti canvas — full-screen overlay, GC's itself after particles die
+    function launchConfetti(count, colors) {
+      const canvas = document.createElement("canvas");
+      canvas.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:9999";
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      document.body.appendChild(canvas);
+      const c = canvas.getContext("2d");
+      const parts = [];
+      for (let i = 0; i < count; i++) {
+        parts.push({
+          x: canvas.width / 2 + (Math.random() - 0.5) * 200,
+          y: canvas.height / 3,
+          vx: (Math.random() - 0.5) * 14,
+          vy: -Math.random() * 12 - 5,
+          g: 0.35 + Math.random() * 0.15,
+          size: 6 + Math.random() * 6,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          rot: Math.random() * Math.PI * 2,
+          vrot: (Math.random() - 0.5) * 0.3,
+          life: 0,
+        });
+      }
+      let raf;
+      function frame() {
+        c.clearRect(0, 0, canvas.width, canvas.height);
+        let alive = 0;
+        for (const p of parts) {
+          p.vy += p.g;
+          p.x += p.vx;
+          p.y += p.vy;
+          p.rot += p.vrot;
+          p.life++;
+          if (p.y < canvas.height + 50 && p.life < 200) {
+            alive++;
+            c.save();
+            c.translate(p.x, p.y);
+            c.rotate(p.rot);
+            c.fillStyle = p.color;
+            c.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+            c.restore();
+          }
+        }
+        if (alive > 0) {
+          raf = requestAnimationFrame(frame);
+        } else {
+          cancelAnimationFrame(raf);
+          canvas.remove();
+        }
+      }
+      frame();
+    }
+
+    // Flash whole screen briefly (refunds)
+    function flashScreen(color) {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = `position:fixed;inset:0;background:${color};opacity:0.4;pointer-events:none;z-index:9998;transition:opacity 0.6s ease-out`;
+      document.body.appendChild(overlay);
+      requestAnimationFrame(() => { overlay.style.opacity = "0"; });
+      setTimeout(() => overlay.remove(), 700);
+    }
+
+    // Toast in top-right
+    function showToast(msg, color) {
+      const t = document.createElement("div");
+      t.style.cssText = `position:fixed;top:20px;right:20px;background:${color};color:#000;padding:14px 18px;border-radius:10px;font-weight:700;font-size:15px;box-shadow:0 8px 30px rgba(0,0,0,0.4);z-index:10000;transform:translateX(120%);transition:transform 0.35s cubic-bezier(0.2,0.9,0.3,1.2)`;
+      t.textContent = msg;
+      document.body.appendChild(t);
+      requestAnimationFrame(() => { t.style.transform = "translateX(0)"; });
+      setTimeout(() => {
+        t.style.transform = "translateX(120%)";
+        setTimeout(() => t.remove(), 400);
+      }, 3500);
+    }
+
+    // Animated $ amount fly from center → KPI region
+    function flyAmount(amount, color) {
+      const el = document.createElement("div");
+      el.textContent = `+$${amount.toFixed(2)}`;
+      el.style.cssText = `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%) scale(0.6);color:${color};font-weight:800;font-size:64px;text-shadow:0 4px 20px rgba(0,0,0,0.6);pointer-events:none;z-index:10001;transition:transform 1.2s cubic-bezier(0.4,0,0.2,1),opacity 1.2s ease-out;opacity:1`;
+      document.body.appendChild(el);
+      requestAnimationFrame(() => {
+        el.style.transform = "translate(-50%,-50%) scale(1.4)";
+        setTimeout(() => {
+          // Fly up to KPI area
+          el.style.transform = "translate(-50%,-300px) scale(0.4)";
+          el.style.opacity = "0";
+        }, 400);
+      });
+      setTimeout(() => el.remove(), 1700);
+    }
+
+    function fireReward(tx) {
+      if (document.hidden) {
+        // Tab not focused — fire confetti/toast anyway, audio will queue silently if needed
+      }
+      const type = tx.transaction_type;
+      const price = Number(tx.price || 0);
+      const app = tx.app_name || "Unknown";
+
+      if (type === "new_subscription" || type === "trial_to_paid" || type === "one_time_purchase") {
+        // Conversion — biggest reward
+        // Tier by price: <$10 = small, $10-$30 = med, >$30 = huge
+        const tier = price > 30 ? 3 : price > 10 ? 2 : 1;
+        const confettiCount = 80 * tier;
+        const vol = Math.min(0.5, 0.15 + tier * 0.1);
+        if (soundEnabled) playChaChing(vol);
+        launchConfetti(confettiCount, ["#4ade80","#22c55e","#86efac","#bbf7d0","#fde047","#facc15"]);
+        flyAmount(price, "#4ade80");
+        showToast(`💰 ${app} • $${price.toFixed(2)}`, "#4ade80");
+      } else if (type === "renewal") {
+        if (soundEnabled) playCoin(0.2);
+        launchConfetti(25, ["#a855f7","#c084fc","#d8b4fe","#e9d5ff"]);
+        showToast(`🔁 ${app} renewal • $${price.toFixed(2)}`, "#c084fc");
+      } else if (type === "refund") {
+        if (soundEnabled) playSad(0.3);
+        flashScreen("#dc2626");
+        showToast(`💸 ${app} refund • -$${price.toFixed(2)}`, "#fca5a5");
+      }
+    }
+
+    // Sound toggle button — also primes AudioContext on first click (browser autoplay policy)
+    function installSoundToggle() {
+      const btn = document.createElement("button");
+      btn.id = "soundToggle";
+      btn.style.cssText = "position:fixed;bottom:20px;right:20px;background:#222;color:#fff;border:1px solid #444;border-radius:50%;width:44px;height:44px;font-size:20px;cursor:pointer;z-index:9997;display:flex;align-items:center;justify-content:center";
+      function render() { btn.textContent = soundEnabled ? "🔊" : "🔇"; btn.title = soundEnabled ? "Mute rewards" : "Unmute rewards"; }
+      render();
+      btn.addEventListener("click", () => {
+        soundEnabled = !soundEnabled;
+        localStorage.setItem("rewardSound", soundEnabled ? "on" : "off");
+        render();
+        // Prime audio context with a click so browser allows future programmatic playback
+        getAudioCtx();
+        if (soundEnabled) playCoin(0.15); // confirm-tone
+      });
+      document.body.appendChild(btn);
+    }
+    installSoundToggle();
   </script>
 </body>
 </html>
