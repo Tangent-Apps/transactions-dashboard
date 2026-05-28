@@ -1166,6 +1166,7 @@
       } else if (type === "renewal") {
         if (soundEnabled) playCoin(0.3);
         launchConfetti(70, ["#a855f7","#c084fc","#d8b4fe","#e9d5ff","#fde047","#ffffff"]);
+        flyAmount(price, "#c084fc");
         showToast(`🔁 ${app} renewal • $${price.toFixed(2)}`, "#c084fc");
       } else if (type === "refund") {
         if (soundEnabled) playSad(0.4);
