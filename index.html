@@ -725,66 +725,245 @@
       return audioCtx;
     }
 
-    // Cha-ching: two-tone bell with quick decay
-    function playChaChing(volume) {
+    // Master compressor for punch + warmth
+    function makeMasterChain() {
       const ctx = getAudioCtx();
-      if (!ctx) return;
-      const now = ctx.currentTime;
-      const notes = [
-        { freq: 1318.51, start: 0,    dur: 0.18 }, // E6
-        { freq: 1567.98, start: 0.08, dur: 0.50 }, // G6
-      ];
-      notes.forEach(n => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = "triangle";
-        osc.frequency.value = n.freq;
-        gain.gain.setValueAtTime(0, now + n.start);
-        gain.gain.linearRampToValueAtTime(volume, now + n.start + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur);
-        osc.connect(gain).connect(ctx.destination);
-        osc.start(now + n.start);
-        osc.stop(now + n.start + n.dur + 0.05);
-      });
+      if (!ctx) return null;
+      if (ctx._master) return ctx._master;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -18;
+      comp.knee.value = 12;
+      comp.ratio.value = 6;
+      comp.attack.value = 0.003;
+      comp.release.value = 0.25;
+      const master = ctx.createGain();
+      master.gain.value = 1.0;
+      comp.connect(master).connect(ctx.destination);
+      ctx._master = comp;
+      return comp;
     }
 
-    // Soft coin ping
-    function playCoin(volume) {
+    // Reverb impulse — synthetic short tail for sparkle
+    function getReverb() {
+      const ctx = getAudioCtx();
+      if (!ctx) return null;
+      if (ctx._reverb) return ctx._reverb;
+      const len = ctx.sampleRate * 1.2;
+      const ir = ctx.createBuffer(2, len, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const data = ir.getChannelData(ch);
+        for (let i = 0; i < len; i++) {
+          data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+        }
+      }
+      const conv = ctx.createConvolver();
+      conv.buffer = ir;
+      const wet = ctx.createGain();
+      wet.gain.value = 0.25;
+      conv.connect(wet);
+      ctx._reverb = { input: conv, output: wet };
+      return ctx._reverb;
+    }
+
+    // White noise burst (for "sssh" sparkle layer)
+    function noiseBurst(duration, freqStart, freqEnd, volume) {
       const ctx = getAudioCtx();
       if (!ctx) return;
+      const master = makeMasterChain();
+      const reverb = getReverb();
+      const now = ctx.currentTime;
+      const bufferSize = ctx.sampleRate * duration;
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.Q.value = 3;
+      bp.frequency.setValueAtTime(freqStart, now);
+      bp.frequency.exponentialRampToValueAtTime(freqEnd, now + duration);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(volume, now + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+      src.connect(bp).connect(gain);
+      gain.connect(master);
+      if (reverb) gain.connect(reverb.input);
+      src.start(now);
+      src.stop(now + duration + 0.05);
+    }
+
+    // Sub-bass thump (punch)
+    function bassThump(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const master = makeMasterChain();
       const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
-      osc.frequency.setValueAtTime(2093, now); // C7
-      osc.frequency.exponentialRampToValueAtTime(2637, now + 0.05); // E7
+      osc.frequency.setValueAtTime(90, now);
+      osc.frequency.exponentialRampToValueAtTime(30, now + 0.18);
       gain.gain.setValueAtTime(0, now);
       gain.gain.linearRampToValueAtTime(volume, now + 0.005);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-      osc.connect(gain).connect(ctx.destination);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      osc.connect(gain).connect(master);
       osc.start(now);
-      osc.stop(now + 0.2);
+      osc.stop(now + 0.3);
     }
 
-    // Sad descending trombone
+    // BOMBASTIC cha-ching: bass thump + bell stack chord + sparkle noise + reverb + harmonics
+    function playChaChing(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const master = makeMasterChain();
+      const reverb = getReverb();
+      const now = ctx.currentTime;
+
+      // Layer 1: bass thump
+      bassThump(volume * 0.9);
+
+      // Layer 2: bell-like chord stack (C E G C — major triad up an octave)
+      const chord = [
+        { freq: 1046.5,  start: 0.02, dur: 0.55, gain: 0.7 },  // C6
+        { freq: 1318.51, start: 0.04, dur: 0.65, gain: 0.8 },  // E6
+        { freq: 1567.98, start: 0.06, dur: 0.80, gain: 0.9 },  // G6
+        { freq: 2093.0,  start: 0.10, dur: 1.10, gain: 0.6 },  // C7
+        { freq: 2637.0,  start: 0.14, dur: 1.30, gain: 0.4 },  // E7 sparkle
+        { freq: 3136.0,  start: 0.18, dur: 1.50, gain: 0.3 },  // G7 sparkle
+      ];
+      chord.forEach(n => {
+        // Fundamental
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.value = n.freq;
+        const t0 = now + n.start;
+        gain.gain.setValueAtTime(0, t0);
+        gain.gain.linearRampToValueAtTime(volume * n.gain, t0 + 0.005);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + n.dur);
+        osc.connect(gain).connect(master);
+        if (reverb) gain.connect(reverb.input);
+        osc.start(t0);
+        osc.stop(t0 + n.dur + 0.05);
+
+        // Second harmonic (sine, lower amp) for shimmer
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = "sine";
+        osc2.frequency.value = n.freq * 2;
+        gain2.gain.setValueAtTime(0, t0);
+        gain2.gain.linearRampToValueAtTime(volume * n.gain * 0.25, t0 + 0.005);
+        gain2.gain.exponentialRampToValueAtTime(0.001, t0 + n.dur * 0.7);
+        osc2.connect(gain2).connect(master);
+        osc2.start(t0);
+        osc2.stop(t0 + n.dur + 0.05);
+      });
+
+      // Layer 3: sparkle noise sweep (the "shimmer" sound)
+      noiseBurst(0.4, 4000, 10000, volume * 0.15);
+      noiseBurst(0.6, 2000, 6000, volume * 0.1);
+    }
+
+    // BIG coin ping with brightness + tiny chord follow
+    function playCoin(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const master = makeMasterChain();
+      const reverb = getReverb();
+      const now = ctx.currentTime;
+
+      // Main ping
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(1568, now); // G6
+      osc.frequency.exponentialRampToValueAtTime(2349, now + 0.04); // D7
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(volume, now + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      osc.connect(gain).connect(master);
+      if (reverb) gain.connect(reverb.input);
+      osc.start(now);
+      osc.stop(now + 0.4);
+
+      // Follow-up fifth (tiny shimmer)
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = "sine";
+      osc2.frequency.value = 3136; // G7
+      gain2.gain.setValueAtTime(0, now + 0.06);
+      gain2.gain.linearRampToValueAtTime(volume * 0.4, now + 0.07);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+      osc2.connect(gain2).connect(master);
+      osc2.start(now + 0.06);
+      osc2.stop(now + 0.55);
+    }
+
+    // BOMBASTIC sad: bass drop + descending sawtooth chord
     function playSad(volume) {
       const ctx = getAudioCtx();
       if (!ctx) return;
+      const master = makeMasterChain();
       const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sawtooth";
-      osc.frequency.setValueAtTime(440, now);
-      osc.frequency.exponentialRampToValueAtTime(110, now + 0.6);
-      gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(volume * 0.5, now + 0.05);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.75);
+      // Three voices descending in a minor chord
+      [
+        { startF: 523, endF: 130, dur: 0.9, gain: 0.5 },  // C5 → C3
+        { startF: 622, endF: 155, dur: 0.9, gain: 0.4 },  // Eb
+        { startF: 392, endF: 98,  dur: 0.9, gain: 0.4 },  // G4 → G2
+      ].forEach(v => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(v.startF, now);
+        osc.frequency.exponentialRampToValueAtTime(v.endF, now + v.dur);
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(volume * v.gain, now + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + v.dur);
+        osc.connect(gain).connect(master);
+        osc.start(now);
+        osc.stop(now + v.dur + 0.05);
+      });
     }
 
-    // Confetti canvas — full-screen overlay, GC's itself after particles die
+    // Screen shake on huge wins
+    function screenShake(intensity, durationMs) {
+      const root = document.body;
+      const start = performance.now();
+      function tick(now) {
+        const t = now - start;
+        if (t >= durationMs) {
+          root.style.transform = "";
+          return;
+        }
+        const decay = 1 - t / durationMs;
+        const x = (Math.random() - 0.5) * intensity * decay;
+        const y = (Math.random() - 0.5) * intensity * decay;
+        root.style.transform = `translate(${x}px,${y}px)`;
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // Draw a 5-point star
+    function drawStar(c, size) {
+      const spikes = 5;
+      const outer = size;
+      const inner = size * 0.5;
+      c.beginPath();
+      for (let i = 0; i < spikes * 2; i++) {
+        const r = i % 2 === 0 ? outer : inner;
+        const a = (Math.PI / spikes) * i - Math.PI / 2;
+        const x = Math.cos(a) * r;
+        const y = Math.sin(a) * r;
+        if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+      }
+      c.closePath();
+      c.fill();
+    }
+
+    // BOMBASTIC confetti — multi-origin burst, mixed shapes, sparkle trails, screen shake
     function launchConfetti(count, colors) {
       const canvas = document.createElement("canvas");
       canvas.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:9999";
@@ -792,41 +971,127 @@
       canvas.height = window.innerHeight;
       document.body.appendChild(canvas);
       const c = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+
+      // Screen shake intensity scales with count
+      if (count >= 100) screenShake(Math.min(20, count / 15), 350);
+
+      // Multi-origin: center + two bottom corners (firework cannon style)
+      const origins = [
+        { x: W / 2,       y: H / 2,       angleMin: -Math.PI, angleMax: 0, power: 1.0 },
+        { x: 0,           y: H,           angleMin: -Math.PI * 0.75, angleMax: -Math.PI * 0.25, power: 1.2 },
+        { x: W,           y: H,           angleMin: -Math.PI * 0.75, angleMax: -Math.PI * 0.25, power: 1.2 },
+      ];
+
+      const shapes = ["rect", "circle", "star", "ribbon"];
       const parts = [];
       for (let i = 0; i < count; i++) {
+        const origin = origins[i % origins.length];
+        const angle = origin.angleMin + Math.random() * (origin.angleMax - origin.angleMin);
+        const speed = (8 + Math.random() * 14) * origin.power;
         parts.push({
-          x: canvas.width / 2 + (Math.random() - 0.5) * 200,
-          y: canvas.height / 3,
-          vx: (Math.random() - 0.5) * 14,
-          vy: -Math.random() * 12 - 5,
-          g: 0.35 + Math.random() * 0.15,
-          size: 6 + Math.random() * 6,
+          x: origin.x + (Math.random() - 0.5) * 40,
+          y: origin.y + (Math.random() - 0.5) * 40,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          g: 0.28 + Math.random() * 0.12,
+          drag: 0.985 + Math.random() * 0.01,
+          size: 5 + Math.random() * 9,
           color: colors[Math.floor(Math.random() * colors.length)],
           rot: Math.random() * Math.PI * 2,
-          vrot: (Math.random() - 0.5) * 0.3,
+          vrot: (Math.random() - 0.5) * 0.4,
+          shape: shapes[Math.floor(Math.random() * shapes.length)],
+          flutter: Math.random() * Math.PI * 2,
+          flutterSpeed: 0.1 + Math.random() * 0.15,
           life: 0,
+          maxLife: 250 + Math.random() * 100,
         });
       }
+
+      // Sparkle particles (smaller, glowing, longer fade)
+      const sparkles = [];
+      const sparkleCount = Math.floor(count * 0.4);
+      for (let i = 0; i < sparkleCount; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 6;
+        sparkles.push({
+          x: W / 2 + (Math.random() - 0.5) * 100,
+          y: H / 2 + (Math.random() - 0.5) * 100,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 3,
+          g: 0.05,
+          drag: 0.96,
+          size: 1.5 + Math.random() * 2.5,
+          color: "#fffbe6",
+          life: 0,
+          maxLife: 60 + Math.random() * 40,
+        });
+      }
+
       let raf;
       function frame() {
-        c.clearRect(0, 0, canvas.width, canvas.height);
+        c.clearRect(0, 0, W, H);
         let alive = 0;
+
+        // Confetti
         for (const p of parts) {
           p.vy += p.g;
+          p.vx *= p.drag;
+          p.vy *= p.drag;
           p.x += p.vx;
           p.y += p.vy;
           p.rot += p.vrot;
+          p.flutter += p.flutterSpeed;
           p.life++;
-          if (p.y < canvas.height + 50 && p.life < 200) {
+          if (p.y < H + 50 && p.life < p.maxLife) {
             alive++;
             c.save();
             c.translate(p.x, p.y);
             c.rotate(p.rot);
+            // Flutter scale: simulate paper tumbling in air
+            const flutterScale = Math.abs(Math.cos(p.flutter));
+            c.scale(flutterScale + 0.3, 1);
             c.fillStyle = p.color;
-            c.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+            const fade = 1 - p.life / p.maxLife;
+            c.globalAlpha = Math.min(1, fade * 1.5);
+            if (p.shape === "rect") {
+              c.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+            } else if (p.shape === "circle") {
+              c.beginPath();
+              c.arc(0, 0, p.size / 2, 0, Math.PI * 2);
+              c.fill();
+            } else if (p.shape === "star") {
+              drawStar(c, p.size * 0.6);
+            } else if (p.shape === "ribbon") {
+              c.fillRect(-p.size / 2, -p.size / 8, p.size * 1.5, p.size / 4);
+            }
             c.restore();
           }
         }
+
+        // Sparkles
+        for (const s of sparkles) {
+          s.vy += s.g;
+          s.vx *= s.drag;
+          s.vy *= s.drag;
+          s.x += s.vx;
+          s.y += s.vy;
+          s.life++;
+          if (s.life < s.maxLife) {
+            alive++;
+            const fade = 1 - s.life / s.maxLife;
+            c.save();
+            c.globalAlpha = fade;
+            c.fillStyle = s.color;
+            c.shadowBlur = 12;
+            c.shadowColor = "#fde047";
+            c.beginPath();
+            c.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+            c.fill();
+            c.restore();
+          }
+        }
+
         if (alive > 0) {
           raf = requestAnimationFrame(frame);
         } else {
@@ -886,20 +1151,24 @@
 
       if (type === "new_subscription" || type === "trial_to_paid" || type === "one_time_purchase") {
         // Conversion — biggest reward
-        // Tier by price: <$10 = small, $10-$30 = med, >$30 = huge
+        // Tier by price: <$10 = small, $10-$30 = med, >$30 = HUGE
         const tier = price > 30 ? 3 : price > 10 ? 2 : 1;
-        const confettiCount = 80 * tier;
-        const vol = Math.min(0.5, 0.15 + tier * 0.1);
+        const confettiCount = tier === 3 ? 350 : tier === 2 ? 200 : 120;
+        const vol = Math.min(0.55, 0.2 + tier * 0.12);
         if (soundEnabled) playChaChing(vol);
-        launchConfetti(confettiCount, ["#4ade80","#22c55e","#86efac","#bbf7d0","#fde047","#facc15"]);
+        launchConfetti(confettiCount, [
+          "#4ade80","#22c55e","#16a34a","#86efac","#bbf7d0",
+          "#fde047","#facc15","#eab308","#fef08a",
+          "#ffffff","#fff7ed"
+        ]);
         flyAmount(price, "#4ade80");
         showToast(`💰 ${app} • $${price.toFixed(2)}`, "#4ade80");
       } else if (type === "renewal") {
-        if (soundEnabled) playCoin(0.2);
-        launchConfetti(25, ["#a855f7","#c084fc","#d8b4fe","#e9d5ff"]);
+        if (soundEnabled) playCoin(0.3);
+        launchConfetti(70, ["#a855f7","#c084fc","#d8b4fe","#e9d5ff","#fde047","#ffffff"]);
         showToast(`🔁 ${app} renewal • $${price.toFixed(2)}`, "#c084fc");
       } else if (type === "refund") {
-        if (soundEnabled) playSad(0.3);
+        if (soundEnabled) playSad(0.4);
         flashScreen("#dc2626");
         showToast(`💸 ${app} refund • -$${price.toFixed(2)}`, "#fca5a5");
       }
@@ -959,6 +1228,9 @@
           <button data-snd="sad" class="tb">😞 Sad trombone</button>
           <button data-snd="chord" class="tb">🎵 Cash chord (alt)</button>
           <button data-snd="kalimba" class="tb">🎼 Kalimba (alt)</button>
+          <button data-snd="mega" class="tb">🎺 MEGA win (chaching + arp)</button>
+          <button data-snd="bass" class="tb">🥁 Bass thump only</button>
+          <button data-snd="sparkle" class="tb">✨ Sparkle noise only</button>
 
           <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Visual variants only</div>
           <button data-vis="confetti-heavy" class="tb">🎊 Confetti heavy</button>
@@ -998,6 +1270,9 @@
           else if (s === "sad") playSad(0.4);
           else if (s === "chord") playCashChord(0.4);
           else if (s === "kalimba") playKalimba(0.4);
+          else if (s === "mega") playMegaWin(0.5);
+          else if (s === "bass") bassThump(0.6);
+          else if (s === "sparkle") { noiseBurst(0.5, 4000, 10000, 0.3); noiseBurst(0.7, 2000, 6000, 0.2); }
         };
       });
       panel.querySelectorAll("button[data-vis]").forEach(b => {
@@ -1030,6 +1305,32 @@
         osc.connect(gain).connect(ctx.destination);
         osc.start(t0);
         osc.stop(t0 + 0.65);
+      });
+    }
+
+    function playMegaWin(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      // Full cha-ching + ascending arpeggio over the top
+      playChaChing(volume);
+      const master = makeMasterChain();
+      const reverb = getReverb();
+      const now = ctx.currentTime;
+      // C major arpeggio sweeping up
+      const notes = [261.63, 329.63, 392, 523.25, 659.25, 783.99, 1046.5];
+      notes.forEach((f, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.value = f;
+        const t0 = now + 0.25 + i * 0.08;
+        gain.gain.setValueAtTime(0, t0);
+        gain.gain.linearRampToValueAtTime(volume * 0.5, t0 + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.4);
+        osc.connect(gain).connect(master);
+        if (reverb) gain.connect(reverb.input);
+        osc.start(t0);
+        osc.stop(t0 + 0.45);
       });
     }
 
