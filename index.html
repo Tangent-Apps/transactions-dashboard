@@ -1168,7 +1168,10 @@
         flyAmount(price, "#c084fc");
         showToast(`🔁 ${app} renewal • $${price.toFixed(2)}`, "#c084fc");
       } else if (type === "refund") {
-        if (soundEnabled) playSad(0.4);
+        if (soundEnabled) {
+          noiseBurst(0.5, 4000, 10000, 0.3);
+          noiseBurst(0.7, 2000, 6000, 0.2);
+        }
         flashScreen("#dc2626");
         showToast(`💸 ${app} refund • -$${price.toFixed(2)}`, "#fca5a5");
       }
