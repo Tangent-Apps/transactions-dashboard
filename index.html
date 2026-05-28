@@ -973,9 +973,6 @@
       const c = canvas.getContext("2d");
       const W = canvas.width, H = canvas.height;
 
-      // Screen shake intensity scales with count
-      if (count >= 100) screenShake(Math.min(20, count / 15), 350);
-
       // Multi-origin: center + two bottom corners (firework cannon style)
       const origins = [
         { x: W / 2,       y: H / 2,       angleMin: -Math.PI, angleMax: 0, power: 1.0 },
@@ -1150,9 +1147,11 @@
       const app = tx.app_name || "Unknown";
 
       if (type === "new_subscription" || type === "trial_to_paid" || type === "one_time_purchase") {
-        // Conversion — biggest reward
-        // Tier by price: <$10 = small, $10-$30 = med, >$30 = HUGE
-        const tier = price > 30 ? 3 : price > 10 ? 2 : 1;
+        // Conversion reward tiered by $amount only (not by type):
+        //   tier 1: < $10        — small celebration
+        //   tier 2: $10 – $60    — medium celebration
+        //   tier 3: > $60        — HUGE celebration
+        const tier = price > 60 ? 3 : price >= 10 ? 2 : 1;
         const confettiCount = tier === 3 ? 350 : tier === 2 ? 200 : 120;
         const vol = Math.min(0.55, 0.2 + tier * 0.12);
         if (soundEnabled) playChaChing(vol);
