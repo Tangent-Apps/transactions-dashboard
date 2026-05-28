@@ -923,6 +923,137 @@
       document.body.appendChild(btn);
     }
     installSoundToggle();
+
+    // ============================================================
+    // TEMPORARY REWARD TESTER PANEL
+    // Toggle with ?test=1 in URL, or always-on for now.
+    // Remove block once tuning is done.
+    // ============================================================
+    function installTesterPanel() {
+      const panel = document.createElement("div");
+      panel.id = "rewardTester";
+      panel.style.cssText = "position:fixed;bottom:80px;right:20px;background:#1a1a1a;border:1px solid #444;border-radius:10px;padding:14px;z-index:9996;color:#fff;font-size:12px;width:280px;box-shadow:0 8px 30px rgba(0,0,0,0.6);font-family:-apple-system,sans-serif";
+      panel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <strong style="font-size:13px">🎛 Reward Tester</strong>
+          <button id="testerClose" style="background:none;border:none;color:#888;cursor:pointer;font-size:18px;line-height:1">×</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px">Conversions (tiered)</div>
+          <button data-act="conv" data-price="4.99" class="tb">💰 New sub \$4.99 (tier 1)</button>
+          <button data-act="conv" data-price="19.99" class="tb">💰 New sub \$19.99 (tier 2)</button>
+          <button data-act="conv" data-price="59.99" class="tb">💰 New sub \$59.99 (tier 3 - huge)</button>
+          <button data-act="t2p" data-price="29.99" class="tb">💰 Trial→Paid \$29.99</button>
+
+          <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Renewals</div>
+          <button data-act="renewal" data-price="4.99" class="tb">🔁 Renewal \$4.99</button>
+          <button data-act="renewal" data-price="59.99" class="tb">🔁 Renewal \$59.99</button>
+
+          <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Refunds</div>
+          <button data-act="refund" data-price="9.99" class="tb">💸 Refund \$9.99</button>
+          <button data-act="refund" data-price="59.99" class="tb">💸 Refund \$59.99</button>
+
+          <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Sound variants only</div>
+          <button data-snd="chaching" class="tb">🔔 Cha-ching</button>
+          <button data-snd="coin" class="tb">🪙 Coin ping</button>
+          <button data-snd="sad" class="tb">😞 Sad trombone</button>
+          <button data-snd="chord" class="tb">🎵 Cash chord (alt)</button>
+          <button data-snd="kalimba" class="tb">🎼 Kalimba (alt)</button>
+
+          <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Visual variants only</div>
+          <button data-vis="confetti-heavy" class="tb">🎊 Confetti heavy</button>
+          <button data-vis="confetti-light" class="tb">🎉 Confetti light</button>
+          <button data-vis="flash-green" class="tb">⚡ Flash green</button>
+          <button data-vis="flash-red" class="tb">⚡ Flash red</button>
+          <button data-vis="fly-amount" class="tb">💸 Flying \$50</button>
+        </div>
+        <style>
+          #rewardTester .tb { background:#2a2a2a;color:#fff;border:1px solid #3a3a3a;border-radius:6px;padding:8px 10px;font-size:12px;cursor:pointer;text-align:left;font-family:inherit }
+          #rewardTester .tb:hover { background:#383838;border-color:#555 }
+        </style>
+      `;
+      document.body.appendChild(panel);
+
+      panel.querySelector("#testerClose").onclick = () => panel.remove();
+
+      panel.querySelectorAll("button[data-act]").forEach(b => {
+        b.onclick = () => {
+          const act = b.dataset.act;
+          const price = Number(b.dataset.price);
+          const fakeApp = "TestApp";
+          let type;
+          if (act === "conv") type = "new_subscription";
+          else if (act === "t2p") type = "trial_to_paid";
+          else if (act === "renewal") type = "renewal";
+          else if (act === "refund") type = "refund";
+          fireReward({ transaction_type: type, price, app_name: fakeApp });
+        };
+      });
+      panel.querySelectorAll("button[data-snd]").forEach(b => {
+        b.onclick = () => {
+          getAudioCtx();
+          const s = b.dataset.snd;
+          if (s === "chaching") playChaChing(0.4);
+          else if (s === "coin") playCoin(0.3);
+          else if (s === "sad") playSad(0.4);
+          else if (s === "chord") playCashChord(0.4);
+          else if (s === "kalimba") playKalimba(0.4);
+        };
+      });
+      panel.querySelectorAll("button[data-vis]").forEach(b => {
+        b.onclick = () => {
+          const v = b.dataset.vis;
+          if (v === "confetti-heavy") launchConfetti(240, ["#4ade80","#22c55e","#fde047","#facc15"]);
+          else if (v === "confetti-light") launchConfetti(25, ["#a855f7","#c084fc"]);
+          else if (v === "flash-green") flashScreen("#16a34a");
+          else if (v === "flash-red") flashScreen("#dc2626");
+          else if (v === "fly-amount") flyAmount(50, "#4ade80");
+        };
+      });
+    }
+
+    // Alt sound variants (so you can A/B in tester)
+    function playCashChord(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      // Major chord arpeggio: C5 E5 G5 C6
+      [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.value = f;
+        const t0 = now + i * 0.05;
+        gain.gain.setValueAtTime(0, t0);
+        gain.gain.linearRampToValueAtTime(volume * 0.6, t0 + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.6);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + 0.65);
+      });
+    }
+
+    function playKalimba(volume) {
+      const ctx = getAudioCtx();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      // Pentatonic plink
+      [880, 1318.51, 1760].forEach((f, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = f;
+        const t0 = now + i * 0.07;
+        gain.gain.setValueAtTime(0, t0);
+        gain.gain.linearRampToValueAtTime(volume * 0.5, t0 + 0.003);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.35);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + 0.4);
+      });
+    }
+
+    installTesterPanel();
   </script>
 </body>
 </html>
