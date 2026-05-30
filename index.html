@@ -1206,11 +1206,11 @@
       panel.id = "rewardTester";
       panel.style.cssText = "position:fixed;bottom:80px;right:20px;background:#1a1a1a;border:1px solid #444;border-radius:10px;padding:14px;z-index:9996;color:#fff;font-size:12px;width:280px;box-shadow:0 8px 30px rgba(0,0,0,0.6);font-family:-apple-system,sans-serif";
       panel.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div id="testerHeader" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none">
           <strong style="font-size:13px">🎛 Reward Tester</strong>
-          <button id="testerClose" style="background:none;border:none;color:#888;cursor:pointer;font-size:18px;line-height:1">×</button>
+          <span id="testerChevron" style="color:#888;font-size:14px">▸</span>
         </div>
-        <div style="display:flex;flex-direction:column;gap:6px">
+        <div id="testerBody" style="display:none;flex-direction:column;gap:6px;margin-top:10px">
           <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px">Conversions (tiered)</div>
           <button data-act="conv" data-price="4.99" class="tb">💰 New sub \$4.99 (tier 1)</button>
           <button data-act="conv" data-price="19.99" class="tb">💰 New sub \$19.99 (tier 2)</button>
@@ -1249,7 +1249,19 @@
       `;
       document.body.appendChild(panel);
 
-      panel.querySelector("#testerClose").onclick = () => panel.remove();
+      const body = panel.querySelector("#testerBody");
+      const chevron = panel.querySelector("#testerChevron");
+      let open = localStorage.getItem("testerOpen") === "1"; // closed by default
+      function applyOpen() {
+        body.style.display = open ? "flex" : "none";
+        chevron.textContent = open ? "▾" : "▸";
+      }
+      applyOpen();
+      panel.querySelector("#testerHeader").onclick = () => {
+        open = !open;
+        localStorage.setItem("testerOpen", open ? "1" : "0");
+        applyOpen();
+      };
 
       panel.querySelectorAll("button[data-act]").forEach(b => {
         b.onclick = () => {
