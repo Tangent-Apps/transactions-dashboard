@@ -42,6 +42,7 @@
 
     /* KPI strip */
     .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+    .kpis.kpis-2 { grid-template-columns: repeat(2, 1fr); }
     .kpis.kpis-4 { grid-template-columns: repeat(4, 1fr); }
     .kpis.kpis-5 { grid-template-columns: repeat(5, 1fr); }
     .kpis.kpis-6 { grid-template-columns: repeat(6, 1fr); }
@@ -482,15 +483,11 @@
         const pct = v => formatPct(v, 1);
         const tc = t.counts || {}, yc = y.counts || {};
         const itpLag = swStats.itpLagDays || 4;
-        return '<div class="kpis kpis-4">' +
+        return '<div class="kpis kpis-2">' +
           kpiPair("Paywall rate", t.paywallRate, y.paywallRate, pct,
             "paywalled_users / new_users (today)\n" + tc.paywalled_users + "/" + tc.new_users) +
           kpiPair("Install to Paid %", t.itpRate, y.itpRate, pct,
             "paid_users / new_users (install cohort " + itpLag + "d ago)\n" + tc.itp_paid_users + "/" + tc.itp_new_users) +
-          kpiPair("Cancellation %", t.cancellationRate, y.cancellationRate, pct,
-            "trial_cancellations / trial_starts (cohort " + lag + "d ago)\n" + tc.trial_cancellations + "/" + tc.trial_starts) +
-          kpiPair("Billing issue rate", t.billingIssueRate, y.billingIssueRate, pct,
-            "in_billing_retry / trial_starts (cohort " + lag + "d ago)\n" + tc.in_billing_retry + "/" + tc.trial_starts) +
         '</div>';
       }
 
