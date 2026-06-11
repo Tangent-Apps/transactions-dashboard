@@ -615,3 +615,89 @@ functions.http("superwallStats", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// Lifetime spend for a single user (on-demand, keyed by original_app_user_id).
+// Sums paid events from sw.events_rep; refunds subtract. events_rep retains ~11 months.
+const ltvCache = new Map(); // key = uid, value = { ts, data }
+const LTV_CACHE_TTL_MS = 30 * 60 * 1000;
+
+async function fetchUserLifetime(uid) {
+  // ClickHouse string literal: escape backslash + single quote.
+  const safe = uid.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const sql = `
+SELECT
+  sumIf(JSONExtractFloat(props, 'price'), name IN ('initial_purchase','renewal','non_renewing_purchase')) AS gross,
+  sumIf(JSONExtractFloat(props, 'price'), name = 'refund') AS refunded,
+  countIf(name IN ('initial_purchase','renewal','non_renewing_purchase') AND JSONExtractFloat(props,'price') > 0) AS payment_count,
+  min(ts) AS first_seen,
+  max(ts) AS last_seen
+FROM sw.events_rep
+WHERE isSandbox = 0
+  AND JSONExtractString(props, 'original_app_user_id') = '${safe}'
+  AND name IN ('initial_purchase','renewal','non_renewing_purchase','refund')
+FORMAT JSONEachRow`.trim();
+
+  const rows = await swQuery(sql);
+  const r = rows[0] || {};
+  const gross = Number(r.gross || 0);
+  const refunded = Number(r.refunded || 0);
+  return {
+    uid,
+    total: gross - refunded,
+    gross,
+    refunded,
+    paymentCount: Number(r.payment_count || 0),
+    firstSeen: r.first_seen || null,
+    lastSeen: r.last_seen || null,
+  };
+}
+
+functions.http("userLifetime", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "http://localhost:5173",
+    "http://localhost:8000",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
+    const idToken = authHeader.slice(7);
+    let decoded;
+    try {
+      decoded = await admin.auth().verifyIdToken(idToken);
+    } catch (e) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    if (decoded.dashboard !== true) return res.status(403).json({ error: "Forbidden" });
+
+    const uid = String(req.query.uid || "").trim();
+    if (!uid) return res.status(400).json({ error: "Missing uid" });
+    if (uid.length > 200) return res.status(400).json({ error: "uid too long" });
+
+    const now = Date.now();
+    const hit = ltvCache.get(uid);
+    if (hit && (now - hit.ts) < LTV_CACHE_TTL_MS) {
+      res.set("X-Cache", "HIT");
+      return res.status(200).json(hit.data);
+    }
+
+    const data = await fetchUserLifetime(uid);
+    ltvCache.set(uid, { ts: now, data });
+    res.set("X-Cache", "MISS");
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("userLifetime error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
