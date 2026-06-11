@@ -303,71 +303,6 @@
       }
     }
 
-    // ---- Lifetime value (LTV) per user — on-demand, cached in-session ----
-    const USER_LIFETIME_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/userLifetime";
-    const ltvCache = new Map();   // uid -> { total, paymentCount, ... } or "pending" / "error"
-
-    function ltvTierClass(total) {
-      if (total > 100) return "tier-whale";
-      if (total > 50) return "tier-mid";
-      return "tier-base";
-    }
-    function ltvIcon(total) {
-      if (total > 100) return "👑";
-      if (total > 50) return "💎";
-      return "";
-    }
-    function ltvBadgeText(data) {
-      const icon = ltvIcon(data.total);
-      return (icon ? icon + " " : "") + "$" + data.total.toFixed(0) + " LTV";
-    }
-
-    async function fetchUserLifetime(uid) {
-      const cached = ltvCache.get(uid);
-      if (cached && cached !== "error") return cached === "pending" ? null : cached;
-      ltvCache.set(uid, "pending");
-      try {
-        const user = auth.currentUser;
-        if (!user) { ltvCache.delete(uid); return null; }
-        const idToken = await user.getIdToken();
-        const r = await fetch(USER_LIFETIME_URL + "?uid=" + encodeURIComponent(uid), { headers: { Authorization: "Bearer " + idToken } });
-        if (!r.ok) { ltvCache.set(uid, "error"); return null; }
-        const data = await r.json();
-        ltvCache.set(uid, data);
-        return data;
-      } catch (e) {
-        ltvCache.set(uid, "error");
-        return null;
-      }
-    }
-
-    function applyLtvBadge(el, data) {
-      if (!data || !data.total) return;
-      el.textContent = ltvBadgeText(data);
-      el.classList.add("shown", ltvTierClass(data.total));
-      el.title = `Lifetime: $${data.total.toFixed(2)} • ${data.paymentCount} payments` +
-        (data.firstSeen ? ` • since ${String(data.firstSeen).slice(0,10)}` : "");
-    }
-
-    // After each render, hydrate any renewal LTV badges (deduped via cache).
-    function hydrateLtvBadges() {
-      const slots = document.querySelectorAll(".tx-ltv[data-ltv-uid]");
-      slots.forEach(el => {
-        const uid = el.getAttribute("data-ltv-uid");
-        if (!uid) return;
-        const cached = ltvCache.get(uid);
-        if (cached && cached !== "pending" && cached !== "error") {
-          applyLtvBadge(el, cached);
-          return;
-        }
-        if (cached === "pending" || cached === "error") return;
-        fetchUserLifetime(uid).then(data => {
-          // Re-query the slot — DOM may have re-rendered. Apply to all matching live slots.
-          document.querySelectorAll('.tx-ltv[data-ltv-uid="' + (window.CSS && CSS.escape ? CSS.escape(uid) : uid) + '"]').forEach(s => applyLtvBadge(s, data));
-        });
-      });
-    }
-
     window.setViewMode = function(mode) {
       viewMode = mode;
       document.getElementById("toggleLive").className = "toggle-btn" + (mode === "live" ? " live-active" : "");
@@ -597,10 +532,16 @@
       if (type === "refund") priceCls += " refund";
       else if (type === "renewal") priceCls += " renewal";
       const cardCls = "tx-card" + (tx.recovered_from_billing ? " recovered" : "");
-      // Lifetime-value badge slot — only renewals, filled async after render.
-      const ltvHtml = (type === "renewal" && userId)
-        ? '<span class="tx-ltv" data-ltv-uid="' + userId.replace(/"/g, "&quot;") + '"></span>'
-        : "";
+      // Lifetime-value badge — renewals only, read directly from the doc (eager, stored at webhook).
+      let ltvHtml = "";
+      if (type === "renewal" && tx.lifetime_spend != null && tx.lifetime_spend > 0) {
+        const ltv = Number(tx.lifetime_spend);
+        const tier = ltv > 100 ? "tier-whale" : ltv > 50 ? "tier-mid" : "tier-base";
+        const icon = ltv > 100 ? "👑 " : ltv > 50 ? "💎 " : "";
+        const pays = tx.lifetime_payments != null ? Number(tx.lifetime_payments) + " payments" : "";
+        ltvHtml = '<span class="tx-ltv shown ' + tier + '" title="Lifetime: $' + ltv.toFixed(2) + (pays ? ' • ' + pays : '') + '">' +
+          icon + '$' + ltv.toFixed(0) + ' LTV</span>';
+      }
       const nameLine = '<h3>' + appName + ltvHtml + '</h3>';
       return '<div class="' + cardCls + '" ' + (tx.recovered_from_billing ? 'title="Renewal after billing retry — subscription recovered"' : '') + '>' +
           '<div class="tx-icon">' + iconHtml + '</div>' +
@@ -669,7 +610,6 @@
           html += renderColumns(filtered);
         }
         container.innerHTML = html;
-        hydrateLtvBadges();
         return;
       }
 
@@ -696,7 +636,6 @@
       container.innerHTML = html;
       const btn = document.getElementById("loadMore");
       if (btn) btn.addEventListener("click", loadMore);
-      hydrateLtvBadges();
     }
 
     function updateFilters() {

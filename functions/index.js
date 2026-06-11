@@ -140,6 +140,35 @@ functions.http("swWebhook", async (req, res) => {
       }
     }
 
+    // Lifetime spend for this subscription (keyed by originalTransactionId).
+    // Sum all prior paid Firestore docs for this otid + the current event's price.
+    // Stored on the doc so the dashboard reads it directly (no extra fetch).
+    let lifetimeSpend = null;
+    let lifetimePayments = null;
+    const PAID_TT = ["renewal", "new_subscription", "trial_to_paid", "one_time_purchase"];
+    if (PAID_TT.includes(tt) && data.originalTransactionId) {
+      try {
+        const snap = await db.collection("transactions")
+          .where("original_transaction_id", "==", data.originalTransactionId)
+          .where("is_sandbox", "==", data.environment === "SANDBOX")
+          .limit(500)
+          .get();
+        let sum = 0, count = 0;
+        snap.forEach(d => {
+          const dd = d.data();
+          if (PAID_TT.includes(dd.transaction_type)) { sum += Number(dd.price || 0); count++; }
+          else if (dd.transaction_type === "refund") { sum -= Math.abs(Number(dd.price || 0)); }
+        });
+        // Add current event (not yet written)
+        sum += Number(data.price || 0);
+        count += 1;
+        lifetimeSpend = Math.round(sum * 100) / 100;
+        lifetimePayments = count;
+      } catch (e) {
+        console.warn("lifetime calc failed:", e.message);
+      }
+    }
+
     const tx = {
       event_type: type,
       transaction_type: tt,
@@ -161,6 +190,8 @@ functions.http("swWebhook", async (req, res) => {
       original_transaction_id: data.originalTransactionId || "",
       is_sandbox: data.environment === "SANDBOX",
       recovered_from_billing: recoveredFromBilling,
+      lifetime_spend: lifetimeSpend,
+      lifetime_payments: lifetimePayments,
     };
 
     await db.collection("transactions").add(tx);
