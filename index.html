@@ -590,6 +590,7 @@
         if (filtered.length === 0) {
           html += '<div class="empty-state"><h2>No transactions today</h2><p>Switch to History to see past transactions.</p></div>';
         } else {
+          html += renderDayHeader("Today", filtered);
           html += renderColumns(filtered);
         }
         container.innerHTML = html;
