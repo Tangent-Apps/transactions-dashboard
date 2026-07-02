@@ -178,9 +178,11 @@
     .ch-legend .ch-lg { display: flex; align-items: center; gap: 6px; }
     .ch-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
     .ch-foot { font-size: 11px; color: #666; margin-top: 12px; line-height: 1.5; }
-    #chTip { transform: translateX(-50%); min-width: 150px; text-align: left; white-space: normal; }
-    #chTip.flip-left { transform: translateX(-100%); }
-    #chTip.flip-right { transform: translateX(0); }
+    #chTip, #rfTip { transform: translateX(-50%); min-width: 150px; text-align: left; white-space: normal; }
+    #chTip.flip-left, #rfTip.flip-left { transform: translateX(-100%); }
+    #chTip.flip-right, #rfTip.flip-right { transform: translateX(0); }
+    /* Refund metric segment: blue active tint, distinct from green Plan / gold Range */
+    .pf-ranges.rf-metric .pf-range-btn.active { background: #16222e; color: #7ec4f0; }
     .pf-tip .t-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; margin-top: 3px; }
     .pf-tip .t-sw { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
     .pf-tip .t-val { margin-left: auto; padding-left: 14px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
@@ -218,6 +220,7 @@
       <button class="section-btn active" id="sectionActivity" onclick="setSection('activity')">Activity</button>
       <button class="section-btn" id="sectionRevenue" onclick="setSection('revenue')">Revenue</button>
       <button class="section-btn" id="sectionChurn" onclick="setSection('churn')">Churn</button>
+      <button class="section-btn" id="sectionRefunds" onclick="setSection('refunds')">Refunds</button>
     </nav>
   </div>
 
@@ -390,11 +393,13 @@
       document.getElementById("sectionActivity").className = "section-btn" + (sec === "activity" ? " active" : "");
       document.getElementById("sectionRevenue").className = "section-btn" + (sec === "revenue" ? " active" : "");
       document.getElementById("sectionChurn").className = "section-btn" + (sec === "churn" ? " active" : "");
+      document.getElementById("sectionRefunds").className = "section-btn" + (sec === "refunds" ? " active" : "");
       // Activity-only controls hide off Activity via visibility (keeps the grid
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
       if (sec === "revenue") { renderPortfolio(); loadMrrSnapshots(); return; }
       if (sec === "churn") { renderChurn(); loadChurn(); return; }
+      if (sec === "refunds") { renderRefunds(); loadRefunds(); return; }
       renderAll();
     };
 
@@ -816,6 +821,202 @@
           let html = '<div class="t-date">'+fmtDayMon(c.week)+' · '+c.size+' subs</div>';
           CHURN_BUCKETS.forEach(b => {
             const v = c[b.key];
+            html += '<div class="t-row"><span class="t-sw" style="background:'+b.color+'"></span>'+b.label+
+              '<span class="t-val">'+(v==null?"—":v.toFixed(1)+"%")+'</span></div>';
+          });
+          tip.innerHTML = html;
+          tip.classList.remove("flip-left","flip-right");
+          if (px > rect.width - 90) tip.classList.add("flip-left");
+          else if (px < 90) tip.classList.add("flip-right");
+          tip.style.left = px + "px";
+          tip.style.top = "10px";
+          tip.style.opacity = "1";
+        });
+        hit.addEventListener("mouseleave", () => {
+          const i = Number(hit.dataset.i);
+          const g = wrap.querySelector('.ch-hg[data-i="'+i+'"]');
+          if (g) { g.querySelectorAll(".ch-hd,.ch-guide").forEach(el => el.setAttribute("opacity","0")); }
+          tip.style.opacity = "0";
+        });
+      });
+    }
+
+    // ---- Refunds (refund cohorts) ----
+    // Churn-twin: same weekly cohort model, but numerator = refunds (isRefund=1).
+    // Two rate modes flipped by a metric toggle:
+    //   txn     = refunded subs / subs started
+    //   revenue = refunded $     / purchased $
+    // Buckets are nested under c[mode][key] (mode = "txn" | "revenue").
+    const REFUND_FN_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/refundCohorts";
+    const REFUND_APPS = [
+      ["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"],
+    ];
+    const REFUND_BUCKETS = [
+      { key:"d0",      label:"Day 0",     color:"#f87171" },
+      { key:"d1_7",    label:"Days 1–7",  color:"#fb923c" },
+      { key:"d8_30",   label:"Days 8–30", color:"#fbbf24" },
+      { key:"d30plus", label:"Day 30+",   color:"#4ade80" },
+    ];
+    const REFUND_WINDOWS = [30, 60, 90, 0];
+    let refundWindow = 60;
+    window.setRefundWindow = function(w) { refundWindow = w; renderRefunds(); };
+    const REFUND_PLANS = [["all","All"],["weekly","Weekly"],["annual","Annual"]];
+    let refundPlan = "all";
+    window.setRefundPlan = function(p) { refundPlan = p; renderRefunds(); loadRefunds(); };
+    const REFUND_METRICS = [["txn","Transactions"],["revenue","Revenue"]];
+    let refundMetric = "txn"; // txn | revenue — display only, no refetch
+    window.setRefundMetric = function(m) { refundMetric = m; renderRefunds(); };
+    let refundApp = "32830";
+    let refundData = {};      // "appId|plan" → { cohorts, ... }
+    let refundInflight = {};
+    let refundError = null;
+    window.setRefundApp = function(id) { refundApp = id; renderRefunds(); loadRefunds(); };
+    function refundKey() { return refundApp + "|" + refundPlan; }
+    // read a bucket value for the active metric mode
+    function rfVal(c, key) { const m = c[refundMetric]; return m ? m[key] : null; }
+
+    async function loadRefunds() {
+      const key = refundKey();
+      if (refundData[key] || refundInflight[key]) return;
+      refundInflight[key] = true; refundError = null;
+      try {
+        const user = auth.currentUser;
+        if (!user) throw new Error("not signed in");
+        const idToken = await user.getIdToken();
+        const r = await fetch(REFUND_FN_URL + "?appId=" + refundApp + "&plan=" + refundPlan, { headers: { Authorization: "Bearer " + idToken } });
+        if (!r.ok) throw new Error("fetch " + r.status + ": " + (await r.text()).slice(0,120));
+        refundData[key] = await r.json();
+      } catch (e) {
+        console.warn("refund load failed", e);
+        refundError = e.message;
+      } finally {
+        delete refundInflight[key];
+        if (section === "refunds") renderRefunds();
+      }
+    }
+
+    function buildRefundChart(cohorts, w, h) {
+      const padL = 40, padR = 14, padT = 14, padB = 26;
+      const iw = w - padL - padR, ih = h - padT - padB;
+      const n = cohorts.length;
+      let maxV = 0;
+      cohorts.forEach(c => REFUND_BUCKETS.forEach(b => { const v=rfVal(c,b.key); if (v!=null && v>maxV) maxV=v; }));
+      const hi = Math.max(5, Math.ceil(maxV/5)*5 + 5);
+      const x = i => padL + (n<=1 ? iw/2 : (i/(n-1))*iw);
+      const y = v => padT + ih - (v/hi)*ih;
+
+      let grid = "";
+      for (let g=0; g<=4; g++) {
+        const gv = hi*g/4, gy = y(gv).toFixed(1);
+        grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="#1f1f1f" stroke-width="1"/>';
+        grid += '<text x="'+(padL-6)+'" y="'+(Number(gy)+3)+'" fill="#555" font-size="9" text-anchor="end">'+gv.toFixed(0)+'%</text>';
+      }
+      let xlab = "";
+      const xIdx = n>2 ? [0, Math.floor(n/2), n-1] : cohorts.map((_,i)=>i);
+      xIdx.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-7)+'" fill="#666" font-size="9" text-anchor="middle">'+fmtDayMon(cohorts[i].week)+'</text>'; });
+
+      let lines = "";
+      REFUND_BUCKETS.forEach(b => {
+        let d = "", pendingMove = true;
+        cohorts.forEach((c,i) => {
+          const v = rfVal(c,b.key);
+          if (v == null) { pendingMove = true; return; }
+          d += (pendingMove ? "M" : "L") + x(i).toFixed(1) + " " + y(v).toFixed(1) + " ";
+          pendingMove = false;
+        });
+        if (d) lines += '<path d="'+d+'" fill="none" stroke="'+b.color+'" stroke-width="2" stroke-linejoin="round"/>';
+        for (let i=n-1;i>=0;i--){ const v=rfVal(cohorts[i],b.key); if(v!=null){ lines += '<circle cx="'+x(i).toFixed(1)+'" cy="'+y(v).toFixed(1)+'" r="2.5" fill="'+b.color+'"/>'; break; } }
+      });
+      let hover = "";
+      cohorts.forEach((c,i) => {
+        const cx = x(i).toFixed(1);
+        let dots = '<line class="ch-guide" x1="'+cx+'" y1="'+padT+'" x2="'+cx+'" y2="'+(padT+ih)+'" stroke="#3a3a3a" stroke-width="1" opacity="0"/>';
+        REFUND_BUCKETS.forEach(b => {
+          const v = rfVal(c,b.key);
+          if (v == null) return;
+          dots += '<circle class="ch-hd" cx="'+cx+'" cy="'+y(v).toFixed(1)+'" r="3.5" fill="'+b.color+'" opacity="0"/>';
+        });
+        hover += '<g class="ch-hg" data-i="'+i+'">'+dots+'</g>';
+        const bw = iw/Math.max(n,1);
+        hover += '<rect class="ch-hit" data-i="'+i+'" data-x="'+cx+'" x="'+(x(i)-bw/2).toFixed(1)+'" y="'+padT+'" width="'+bw.toFixed(1)+'" height="'+ih+'" fill="transparent"/>';
+      });
+      return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+grid+xlab+lines+hover+'</svg>';
+    }
+
+    function renderRefunds() {
+      const container = document.getElementById("container");
+      const appBtns = REFUND_APPS.map(([id,name]) =>
+        '<button class="filter-btn '+(id===refundApp?"active":"")+'" onclick="setRefundApp(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      const metricBtns = REFUND_METRICS.map(([id,name]) =>
+        '<button class="pf-range-btn '+(id===refundMetric?"active":"")+'" onclick="setRefundMetric(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      const planBtns = REFUND_PLANS.map(([id,name]) =>
+        '<button class="pf-range-btn '+(id===refundPlan?"active":"")+'" onclick="setRefundPlan(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      const winBtns = REFUND_WINDOWS.map(w =>
+        '<button class="pf-range-btn '+(w===refundWindow?"active":"")+'" onclick="setRefundWindow('+w+')">'+(w===0?"All":w+"D")+'</button>'
+      ).join("");
+      const subLabel = refundMetric === "revenue"
+        ? "% of each signup-week cohort's revenue refunded, by timing. Hover a week for details."
+        : "% of each signup-week cohort that got refunded, by timing. Hover a week for details.";
+      const header =
+        '<div class="pf-head">' +
+          '<div><div class="pf-m-label">Refund cohorts · weekly</div>' +
+            '<div class="ch-sub">'+subLabel+'</div></div>' +
+          '<div class="ch-filters">' +
+            '<div class="pf-ranges rf-metric">'+metricBtns+'</div>' +
+            '<div class="pf-ranges ch-plan">'+planBtns+'</div>' +
+            '<div class="pf-ranges">'+winBtns+'</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="ch-appbar">'+appBtns+'</div>';
+
+      const d = refundData[refundKey()];
+      if (!d && refundInflight[refundKey()]) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
+      if (refundError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load refunds</h2><p>'+refundError+'</p></div>'; return; }
+      if (!d) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
+      let cohorts = (d.cohorts||[]).filter(c => c.size > 0);
+      if (refundWindow > 0) {
+        const cutoff = Date.now() - refundWindow*86400000;
+        cohorts = cohorts.filter(c => Date.parse(c.week + "T00:00:00Z") >= cutoff);
+      }
+      if (!cohorts.length) { container.innerHTML = header + '<div class="empty-state"><h2>No cohorts</h2><p>No subscriptions in this window.</p></div>'; return; }
+
+      const legend = '<div class="ch-legend">' + REFUND_BUCKETS.map(b =>
+        '<span class="ch-lg"><i style="background:'+b.color+'"></i>'+b.label+'</span>').join("") + '</div>';
+      const chart = buildRefundChart(cohorts, 900, 300);
+
+      const denomHdr = refundMetric === "revenue" ? "Rev" : "Subs";
+      const rows = cohorts.slice().reverse().map(c => {
+        const known = REFUND_BUCKETS.map(b=>rfVal(c,b.key)).filter(v=>v!=null);
+        const total = known.reduce((s,v)=>s+v,0);
+        const denom = refundMetric === "revenue" ? ("$"+Math.round(c.usd||0).toLocaleString()) : c.size;
+        const cells = REFUND_BUCKETS.map(b => { const v=rfVal(c,b.key); return '<td class="pf-t-num r '+(v==null?"dim":"")+'">'+(v==null?"—":v.toFixed(1)+"%")+'</td>'; }).join("");
+        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+denom+'</td>'+cells+'<td class="pf-t-num r">'+total.toFixed(1)+'%</td></tr>';
+      }).join("");
+      const table = '<div class="pf-apps"><h3>By cohort week</h3><table class="pf-table"><thead><tr>' +
+        '<th>Cohort</th><th class="r">'+denomHdr+'</th>' + REFUND_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total*</th>' +
+        '</tr></thead><tbody>'+rows+'</tbody></table>' +
+        '<div class="ch-foot">*Total sums only matured buckets — recent cohorts understate until they age. Cohort = subscription start week; refunds counted first per subscription (isRefund).</div></div>';
+
+      container.innerHTML = header + legend + '<div class="pf-chart-wrap" id="rfChartWrap">'+chart+'<div class="pf-tip" id="rfTip"></div></div>' + table;
+
+      const wrap = document.getElementById("rfChartWrap");
+      const tip = document.getElementById("rfTip");
+      const svg = wrap.querySelector("svg");
+      wrap.querySelectorAll(".ch-hit").forEach(hit => {
+        hit.addEventListener("mouseenter", () => {
+          const i = Number(hit.dataset.i);
+          const g = wrap.querySelector('.ch-hg[data-i="'+i+'"]');
+          if (g) { g.querySelectorAll(".ch-hd,.ch-guide").forEach(el => el.setAttribute("opacity","1")); }
+          const c = cohorts[i];
+          const vb = svg.viewBox.baseVal, rect = svg.getBoundingClientRect();
+          const px = (Number(hit.dataset.x)/vb.width)*rect.width;
+          const dlab = refundMetric === "revenue" ? ("$"+Math.round(c.usd||0).toLocaleString()+" rev") : (c.size+" subs");
+          let html = '<div class="t-date">'+fmtDayMon(c.week)+' · '+dlab+'</div>';
+          REFUND_BUCKETS.forEach(b => {
+            const v = rfVal(c,b.key);
             html += '<div class="t-row"><span class="t-sw" style="background:'+b.color+'"></span>'+b.label+
               '<span class="t-val">'+(v==null?"—":v.toFixed(1)+"%")+'</span></div>';
           });

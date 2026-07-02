@@ -865,3 +865,147 @@ functions.http("churnCohorts", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ---- Refund cohorts ----
+// Same cohort model as churn: weekly cohorts by subscription start
+// (initial_purchase.purchasedAt), per app, plan-split by product keyword.
+// Numerator = refunds (isRefund=1, first per otid) bucketed by age from start:
+// D0 / D1-7 / D8-30 / D30+. Two rate modes:
+//   - txn:     refunded subs / subs started       (count based)
+//   - revenue: refunded $     / purchased $        (value based, price negated)
+// Both numerator+denominator counts AND dollars are returned per bucket so the
+// client can flip modes without a refetch. Immature buckets nulled (maturity gates).
+const refundCache = new Map(); // key = appId|plan, value = { ts, data }
+const REFUND_CACHE_TTL_MS = 30 * 60 * 1000;
+const REFUND_WEEKS = 14;
+
+async function fetchRefundCohorts(appId, plan) {
+  const appFilter = "applicationId = " + Number(appId);
+  const planHaving = plan === "annual" ? "HAVING sub_plan = 'annual'"
+    : plan === "weekly" ? "HAVING sub_plan = 'weekly'"
+    : "";
+  const sql = `
+WITH subs AS (
+  SELECT originalTransactionId AS otid, min(toDate(purchasedAt)) AS start_day,
+    argMin(toFloat64(price), purchasedAt) AS start_price,
+    if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS sub_plan
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE ${appFilter} AND isSandbox=0 AND name='initial_purchase' AND originalTransactionId!='' AND price IS NOT NULL
+  GROUP BY otid
+  ${planHaving}
+),
+refunds AS (
+  SELECT originalTransactionId AS otid, min(toDate(ts)) AS refund_day,
+    -sum(toFloat64(price)) AS refund_amt
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE ${appFilter} AND isSandbox=0 AND isRefund=1 AND originalTransactionId!=''
+  GROUP BY otid
+)
+SELECT
+  toString(toStartOfWeek(s.start_day, 1)) AS cohort_week,
+  count() AS cohort_size,
+  round(sum(s.start_price), 2) AS cohort_usd,
+  countIf(dateDiff('day',s.start_day,r.refund_day)=0) AS d0_n,
+  countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 1 AND 7) AS d1_7_n,
+  countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 8 AND 30) AS d8_30_n,
+  countIf(dateDiff('day',s.start_day,r.refund_day) > 30) AS d30plus_n,
+  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day)=0), 2) AS d0_usd,
+  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) BETWEEN 1 AND 7), 2) AS d1_7_usd,
+  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) BETWEEN 8 AND 30), 2) AS d8_30_usd,
+  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) > 30), 2) AS d30plus_usd
+FROM subs s
+LEFT JOIN refunds r ON s.otid = r.otid
+WHERE s.start_day >= today() - ${REFUND_WEEKS * 7}
+GROUP BY cohort_week ORDER BY cohort_week ASC
+FORMAT JSONEachRow`.trim();
+
+  const rows = await swQuery(sql);
+  const todayMs = Date.now();
+  const cohorts = rows.map((r) => {
+    const size = Number(r.cohort_size) || 0;
+    const usd = Number(r.cohort_usd) || 0;
+    const startMs = Date.parse(r.cohort_week + "T00:00:00Z");
+    const ageDays = Math.floor((todayMs - startMs) / 86400000);
+    const pctN = (n) => (size > 0 ? Math.round((Number(n) / size) * 1000) / 10 : 0);
+    const pctU = (d) => (usd > 0 ? Math.round((Number(d) / usd) * 1000) / 10 : 0);
+    // null a bucket if the cohort hasn't aged past the bucket's window end
+    const gate = (key, val) => (ageDays >= BUCKET_MATURITY_DAYS[key] ? val : null);
+    return {
+      week: r.cohort_week,
+      size,
+      usd,
+      ageDays,
+      // txn-rate mode (count based)
+      txn: {
+        d0: gate("d0", pctN(r.d0_n)),
+        d1_7: gate("d1_7", pctN(r.d1_7_n)),
+        d8_30: gate("d8_30", pctN(r.d8_30_n)),
+        d30plus: gate("d30plus", pctN(r.d30plus_n)),
+      },
+      // revenue-rate mode ($ based)
+      revenue: {
+        d0: gate("d0", pctU(r.d0_usd)),
+        d1_7: gate("d1_7", pctU(r.d1_7_usd)),
+        d8_30: gate("d8_30", pctU(r.d8_30_usd)),
+        d30plus: gate("d30plus", pctU(r.d30plus_usd)),
+      },
+    };
+  });
+  return { appId: Number(appId), plan: plan || "all", cohorts, generatedAt: new Date().toISOString() };
+}
+
+functions.http("refundCohorts", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://localhost:8899",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
+    const idToken = authHeader.slice(7);
+    let decoded;
+    try {
+      decoded = await admin.auth().verifyIdToken(idToken);
+    } catch (e) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    if (decoded.dashboard !== true) return res.status(403).json({ error: "Forbidden" });
+
+    const appIdRaw = req.query.appId;
+    if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) {
+      return res.status(400).json({ error: "appId required" });
+    }
+    const appId = Number(appIdRaw);
+    const planRaw = String(req.query.plan || "all").toLowerCase();
+    const plan = ["all", "weekly", "annual"].includes(planRaw) ? planRaw : "all";
+    const cacheKey = appId + "|" + plan;
+    const now = Date.now();
+    const hit = refundCache.get(cacheKey);
+    if (hit && (now - hit.ts) < REFUND_CACHE_TTL_MS) {
+      res.set("X-Cache", "HIT");
+      return res.status(200).json(hit.data);
+    }
+    const data = await fetchRefundCohorts(appId, plan === "all" ? null : plan);
+    refundCache.set(cacheKey, { ts: now, data });
+    res.set("X-Cache", "MISS");
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("refundCohorts error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
