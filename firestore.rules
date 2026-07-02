@@ -9,5 +9,13 @@ service cloud.firestore {
       allow read: if request.auth != null && request.auth.token.dashboard == true;
       allow write: if false;
     }
+    match /churn_cohorts/{doc} {
+      allow read: if request.auth != null && request.auth.token.dashboard == true;
+      allow write: if false;
+    }
+    match /refund_cohorts/{doc} {
+      allow read: if request.auth != null && request.auth.token.dashboard == true;
+      allow write: if false;
+    }
   }
 }

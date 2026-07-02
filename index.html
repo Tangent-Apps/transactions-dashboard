@@ -243,7 +243,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getFirestore, collection, query, where, orderBy, limit, startAfter, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { getFirestore, collection, query, where, orderBy, limit, startAfter, getDocs, getDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
     import { getAuth, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
     const firebaseConfig = {
@@ -654,7 +654,8 @@
     }
 
     // ---- Churn (cancellation cohorts) ----
-    const CHURN_FN_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/churnCohorts";
+    // Data read from Firestore churn_cohorts/{appId}__{plan}, precomputed daily by the
+    // dashboard routine (which calls the churnCohorts function). No function call here.
     // Apps with meaningful sub volume, ordered by size. id → label.
     const CHURN_APPS = [
       ["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"],
@@ -679,17 +680,18 @@
     window.setChurnApp = function(id) { churnApp = id; renderChurn(); loadChurn(); };
     function churnKey() { return churnApp + "|" + churnPlan; }
 
+    // Cohorts are precomputed daily (the MRR routine calls churnCohorts and stores
+    // the JSON in Firestore churn_cohorts/{appId}__{plan}). We read that doc directly
+    // — no Cloud Function on page load, so N refreshes = N cheap Firestore reads of
+    // the same doc, zero ClickHouse queries.
     async function loadChurn() {
       const key = churnKey();            // capture — app/plan may change mid-fetch
       if (churnData[key] || churnInflight[key]) return; // cached or already loading
       churnInflight[key] = true; churnError = null;
       try {
-        const user = auth.currentUser;
-        if (!user) throw new Error("not signed in");
-        const idToken = await user.getIdToken();
-        const r = await fetch(CHURN_FN_URL + "?appId=" + churnApp + "&plan=" + churnPlan, { headers: { Authorization: "Bearer " + idToken } });
-        if (!r.ok) throw new Error("fetch " + r.status + ": " + (await r.text()).slice(0,120));
-        churnData[key] = await r.json();
+        const snap = await getDoc(doc(db, "churn_cohorts", churnApp + "__" + churnPlan));
+        if (!snap.exists()) throw new Error("no data yet for this app/plan");
+        churnData[key] = JSON.parse(snap.data().payload);
       } catch (e) {
         console.warn("churn load failed", e);
         churnError = e.message;
@@ -847,7 +849,7 @@
     //   txn     = refunded subs / subs started
     //   revenue = refunded $     / purchased $
     // Buckets are nested under c[mode][key] (mode = "txn" | "revenue").
-    const REFUND_FN_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/refundCohorts";
+    // Data read from Firestore refund_cohorts/{appId}__{plan}, precomputed daily.
     const REFUND_APPS = [
       ["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"],
     ];
@@ -875,17 +877,16 @@
     // read a bucket value for the active metric mode
     function rfVal(c, key) { const m = c[refundMetric]; return m ? m[key] : null; }
 
+    // Precomputed daily (routine calls refundCohorts → Firestore refund_cohorts/{appId}__{plan}).
+    // Read the doc directly; no Cloud Function / ClickHouse query on page load.
     async function loadRefunds() {
       const key = refundKey();
       if (refundData[key] || refundInflight[key]) return;
       refundInflight[key] = true; refundError = null;
       try {
-        const user = auth.currentUser;
-        if (!user) throw new Error("not signed in");
-        const idToken = await user.getIdToken();
-        const r = await fetch(REFUND_FN_URL + "?appId=" + refundApp + "&plan=" + refundPlan, { headers: { Authorization: "Bearer " + idToken } });
-        if (!r.ok) throw new Error("fetch " + r.status + ": " + (await r.text()).slice(0,120));
-        refundData[key] = await r.json();
+        const snap = await getDoc(doc(db, "refund_cohorts", refundApp + "__" + refundPlan));
+        if (!snap.exists()) throw new Error("no data yet for this app/plan");
+        refundData[key] = JSON.parse(snap.data().payload);
       } catch (e) {
         console.warn("refund load failed", e);
         refundError = e.message;

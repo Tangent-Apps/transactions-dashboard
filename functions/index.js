@@ -5,6 +5,34 @@ const { Webhook } = require("svix");
 admin.initializeApp();
 const db = admin.firestore();
 
+// The dashboard scheduled job (Claude Code routine on the owner's machine) calls
+// churnCohorts/refundCohorts with a gcloud OAuth access token instead of a Firebase
+// ID token. Accept it if it resolves to the trusted owner via Google userinfo.
+const TRUSTED_SERVICE_EMAILS = ["corentin@tangent-app.com"];
+async function isTrustedOwnerToken(bearer) {
+  try {
+    const r = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: "Bearer " + bearer },
+    });
+    if (!r.ok) return false;
+    const info = await r.json();
+    return info.email_verified === true && TRUSTED_SERVICE_EMAILS.includes((info.email || "").toLowerCase());
+  } catch (_) {
+    return false;
+  }
+}
+// Returns true if the request is authorized: either a Firebase ID token carrying
+// the dashboard claim, or a trusted-owner OAuth access token (service path).
+async function isAuthorized(authHeader) {
+  if (!authHeader.startsWith("Bearer ")) return false;
+  const token = authHeader.slice(7);
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    if (decoded.dashboard === true) return true;
+  } catch (_) { /* not a Firebase ID token — try owner path */ }
+  return isTrustedOwnerToken(token);
+}
+
 function resolveAppName(appId, productId) {
   const id = (appId + productId).toLowerCase();
   if (id.includes("girltalk") || id.includes("girl_talk")) return "GirlTalk";
@@ -832,15 +860,7 @@ functions.http("churnCohorts", async (req, res) => {
 
   try {
     const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
-    const idToken = authHeader.slice(7);
-    let decoded;
-    try {
-      decoded = await admin.auth().verifyIdToken(idToken);
-    } catch (e) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
-    if (decoded.dashboard !== true) return res.status(403).json({ error: "Forbidden" });
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
 
     const appIdRaw = req.query.appId;
     if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) {
@@ -987,15 +1007,7 @@ functions.http("refundCohorts", async (req, res) => {
 
   try {
     const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
-    const idToken = authHeader.slice(7);
-    let decoded;
-    try {
-      decoded = await admin.auth().verifyIdToken(idToken);
-    } catch (e) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
-    if (decoded.dashboard !== true) return res.status(403).json({ error: "Forbidden" });
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
 
     const appIdRaw = req.query.appId;
     if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) {
