@@ -736,16 +736,16 @@ functions.http("userLifetime", async (req, res) => {
 // ---- Cancellation cohorts ----
 // Weekly cohorts by subscription start (initial_purchase.purchasedAt), per app.
 // Cancels (gross 'cancellation' events, first per otid) bucketed by age from start:
-// D0 / D1 / D2-3 / D4-7 / D8+. Each bucket = % of the cohort. Denominator = subs
-// started that week. Immature buckets are nulled per cohort (see maturity gates)
-// so young cohorts don't read artificially low.
+// D0 / D1 / D2+. Each bucket = % of the cohort. Denominator = subs started that
+// week. Immature buckets are nulled per cohort (see maturity gates) so young
+// cohorts don't read artificially low.
 const churnCache = new Map(); // key = appId, value = { ts, data }
 const CHURN_CACHE_TTL_MS = 30 * 60 * 1000;
 const CHURN_WEEKS = 14; // how many weekly cohorts to return
 
 // Bucket needs this many days elapsed since cohort start to be "complete".
-// D8+ keeps accruing forever; treat 15d as settled enough to show.
-const BUCKET_MATURITY_DAYS = { d0: 1, d1: 2, d3: 4, d7: 8, d7plus: 15 };
+// D2+ keeps accruing forever; treat 15d as settled enough to show.
+const BUCKET_MATURITY_DAYS = { d0: 1, d1: 2, d2plus: 15 };
 
 async function fetchChurnCohorts(appId) {
   const appFilter = "applicationId = " + Number(appId);
@@ -767,9 +767,7 @@ SELECT
   count() AS cohort_size,
   countIf(dateDiff('day',s.start_day,c.cancel_day)=0) AS d0,
   countIf(dateDiff('day',s.start_day,c.cancel_day)=1) AS d1,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 2 AND 3) AS d3,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 4 AND 7) AS d7,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) >= 8) AS d7plus
+  countIf(dateDiff('day',s.start_day,c.cancel_day) >= 2) AS d2plus
 FROM subs s
 LEFT JOIN cancels c ON s.otid = c.otid
 WHERE s.start_day >= today() - ${CHURN_WEEKS * 7}
@@ -791,9 +789,7 @@ FORMAT JSONEachRow`.trim();
       ageDays,
       d0: gated(r.d0, "d0"),
       d1: gated(r.d1, "d1"),
-      d3: gated(r.d3, "d3"),
-      d7: gated(r.d7, "d7"),
-      d7plus: gated(r.d7plus, "d7plus"),
+      d2plus: gated(r.d2plus, "d2plus"),
     };
   });
   return { appId: Number(appId), cohorts, generatedAt: new Date().toISOString() };
