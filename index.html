@@ -31,8 +31,9 @@
     .filter-btn:hover { border-color: #444; color: #ccc; }
     .filter-btn.active { background: #fff; color: #000; border-color: #fff; font-weight: 500; }
 
-    /* Primary section nav — Activity | Revenue */
-    .section-nav { display: flex; gap: 4px; flex-shrink: 0; background: #101010; border: 1px solid #262626; border-radius: 9px; padding: 3px; }
+    /* Primary section nav — Activity | Revenue. margin-left:auto pins it right
+       so it never shifts when the Activity-only controls hide on Revenue. */
+    .section-nav { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; background: #101010; border: 1px solid #262626; border-radius: 9px; padding: 3px; }
     .section-btn { padding: 6px 15px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; background: transparent; color: #777; border-radius: 6px; transition: all 0.15s; white-space: nowrap; letter-spacing: -0.01em; }
     .section-btn:hover { color: #bbb; }
     .section-btn.active { background: #232323; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
