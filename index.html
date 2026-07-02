@@ -116,11 +116,14 @@
     .pf-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
     .pf-big { display: flex; gap: 34px; flex-wrap: wrap; }
     .pf-metric .pf-m-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
-    .pf-metric .pf-m-value { font-size: 38px; font-weight: 800; color: #fff; line-height: 1.05; margin-top: 4px; letter-spacing: -0.5px; }
+    .pf-metric .pf-m-value { font-size: 38px; font-weight: 800; color: #fff; line-height: 1.05; margin-top: 4px; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
     .pf-metric .pf-m-value.mrr { color: #fbbf24; }
+    .pf-metric .pf-m-value.plain { color: #e0e0e0; }
     .pf-metric .pf-m-sub { font-size: 12px; margin-top: 5px; color: #888; font-weight: 600; }
     .pf-metric .pf-m-sub.up { color: #4ade80; }
     .pf-metric .pf-m-sub.down { color: #f87171; }
+    .pf-metric .pf-m-sub.dim { color: #777; }
+    .pf-vs.up { color: #4ade80; } .pf-vs.down { color: #f87171; } .pf-vs.dim { color: #777; }
     .pf-ranges { display: flex; gap: 6px; background: #141414; border: 1px solid #232323; border-radius: 9px; padding: 4px; }
     .pf-range-btn { padding: 6px 13px; font-size: 12px; font-weight: 600; border: none; background: transparent; color: #666; border-radius: 6px; cursor: pointer; transition: all 0.15s; }
     .pf-range-btn.active { background: #2a2416; color: #fbbf24; }
@@ -129,14 +132,26 @@
     .pf-tip { position: absolute; pointer-events: none; background: #000; border: 1px solid #333; border-radius: 7px; padding: 6px 9px; font-size: 11px; color: #fff; white-space: nowrap; opacity: 0; transition: opacity 0.1s; z-index: 5; transform: translate(-50%, -115%); }
     .pf-tip .t-date { color: #888; font-size: 10px; }
     .pf-tip .t-mrr { color: #fbbf24; font-weight: 700; }
+    .pf-tip .t-arr { color: #a5b4fc; font-weight: 600; font-size: 10px; margin-top: 1px; }
+    .pf-legend { display: flex; gap: 18px; margin-bottom: 8px; font-size: 11px; color: #888; }
+    .pf-legend .pf-lg { display: flex; align-items: center; gap: 6px; }
+    .pf-legend i { width: 16px; height: 0; border-top-width: 2px; border-top-style: solid; display: inline-block; }
+    .pf-legend .sw-mrr { border-top-color: #fbbf24; }
+    .pf-legend .sw-arr { border-top-color: #5a6a8a; }
     .pf-apps { background: #131313; border: 1px solid #232323; border-radius: 14px; padding: 16px; }
     .pf-apps h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #999; font-weight: 700; margin-bottom: 12px; }
-    .pf-app-row { display: grid; grid-template-columns: 150px 1fr 90px; gap: 12px; align-items: center; padding: 6px 0; }
-    .pf-app-name { font-size: 12px; color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .pf-app-bar-track { background: #1e1e1e; border-radius: 5px; height: 10px; overflow: hidden; }
-    .pf-app-bar { background: linear-gradient(90deg, #b45309, #fbbf24); height: 100%; border-radius: 5px; }
-    .pf-app-val { font-size: 12px; font-weight: 700; color: #fff; text-align: right; }
-    .pf-app-share { font-size: 10px; color: #777; }
+    .pf-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .pf-table th { text-align: left; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #666; padding: 0 10px 10px; border-bottom: 1px solid #232323; }
+    .pf-table th.r, .pf-table td.r { text-align: right; }
+    .pf-table td { padding: 9px 10px; border-bottom: 1px solid #1c1c1c; }
+    .pf-table tr:last-child td { border-bottom: none; }
+    .pf-t-app { font-weight: 600; color: #e8e8e8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+    .pf-t-num { font-variant-numeric: tabular-nums; color: #fff; font-weight: 600; }
+    .pf-t-num.dim { color: #888; font-weight: 500; }
+    .pf-t-spark { vertical-align: middle; width: 130px; }
+    .pf-t-spark svg { vertical-align: middle; }
+    .pf-t-delta { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .pf-t-delta.up { color: #4ade80; } .pf-t-delta.down { color: #f87171; } .pf-t-delta.flat { color: #666; }
     .pf-stale { font-size: 11px; color: #f5a07a; margin-bottom: 12px; }
 
     .show-more { display: block; width: 100%; padding: 12px; margin: 16px 0; background: #1a1a1a; border: 1px solid #232323; border-radius: 10px; color: #aaa; font-size: 13px; cursor: pointer; }
@@ -379,51 +394,50 @@
     }
 
     function buildMrrChart(pts, w, h) {
-      // pts: [{date, mrr}] ascending. Returns SVG string.
+      // pts: [{date, mrr, arr}] ascending. Two lines: MRR (gold, left axis) + ARR (indigo, right axis).
+      // ARR = 12*MRR so it shares the MRR shape; independent scaling keeps both readable.
       const padL = 8, padR = 8, padT = 12, padB = 22;
       const iw = w - padL - padR, ih = h - padT - padB;
-      const vals = pts.map(p => p.mrr);
-      const min = Math.min(...vals), max = Math.max(...vals);
-      const span = (max - min) || 1;
-      const lo = min - span * 0.12, hi = max + span * 0.12;
-      const rng = (hi - lo) || 1;
+      const mvals = pts.map(p => p.mrr);
+      const mMin = Math.min(...mvals), mMax = Math.max(...mvals);
+      const mSpan = (mMax - mMin) || 1;
+      const mLo = mMin - mSpan*0.12, mHi = mMax + mSpan*0.12;
+      const mRng = (mHi - mLo) || 1;
+      // ARR uses the same fractional scale (identical shape), just labeled ×12 on the right.
       const x = i => padL + (pts.length <= 1 ? iw/2 : (i/(pts.length-1))*iw);
-      const y = v => padT + ih - ((v - lo)/rng)*ih;
-      let line = "", area = "";
-      pts.forEach((p,i) => {
-        const px = x(i).toFixed(1), py = y(p.mrr).toFixed(1);
-        line += (i===0?"M":"L") + px + " " + py + " ";
-      });
-      area = line + "L" + x(pts.length-1).toFixed(1) + " " + (padT+ih) + " L" + x(0).toFixed(1) + " " + (padT+ih) + " Z";
-      // gridlines: 4 horizontal
+      const yM = v => padT + ih - ((v - mLo)/mRng)*ih;
+
+      const pathFrom = (key) => {
+        let d = "";
+        pts.forEach((p,i) => { d += (i===0?"M":"L") + x(i).toFixed(1) + " " + yM(p.mrr).toFixed(1) + " "; });
+        return d;
+      };
+      const mrrLine = pathFrom();
+      const area = mrrLine + "L" + x(pts.length-1).toFixed(1) + " " + (padT+ih) + " L" + x(0).toFixed(1) + " " + (padT+ih) + " Z";
+
+      // gridlines + dual axis labels (left MRR, right ARR = 12x)
       let grid = "";
       for (let g=0; g<=3; g++) {
-        const gv = lo + (rng*g/3);
-        const gy = y(gv).toFixed(1);
+        const mv = mLo + (mRng*g/3);
+        const gy = yM(mv).toFixed(1);
         grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="#1f1f1f" stroke-width="1"/>';
-        grid += '<text x="'+(w-padR)+'" y="'+(gy-3)+'" fill="#555" font-size="9" text-anchor="end">'+fmtMoney(gv)+'</text>';
+        grid += '<text x="'+padL+'" y="'+(gy-3)+'" fill="#7a6a3a" font-size="9" text-anchor="start">'+fmtMoney(mv)+'</text>';
+        grid += '<text x="'+(w-padR)+'" y="'+(gy-3)+'" fill="#5a6a8a" font-size="9" text-anchor="end">'+fmtMoney(mv*12)+'</text>';
       }
-      // x labels: first, middle, last
-      const idxs = pts.length > 2 ? [0, Math.floor(pts.length/2), pts.length-1] : pts.map((_,i)=>i);
-      let xlab = "";
-      idxs.forEach(i => {
-        const d = pts[i].date.slice(5); // MM-DD
-        xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-6)+'" fill="#666" font-size="9" text-anchor="middle">'+d+'</text>';
-      });
-      // hover dots (interactive points)
+      // hover targets carry both mrr + arr
       let dots = "";
       pts.forEach((p,i) => {
-        dots += '<circle class="pf-dot" data-i="'+i+'" cx="'+x(i).toFixed(1)+'" cy="'+y(p.mrr).toFixed(1)+'" r="3" fill="#fbbf24" opacity="0"/>';
-        dots += '<rect class="pf-hit" data-i="'+i+'" data-x="'+x(i).toFixed(1)+'" data-y="'+y(p.mrr).toFixed(1)+'" data-mrr="'+p.mrr+'" data-date="'+p.date+'" x="'+(x(i)-(iw/pts.length/2)).toFixed(1)+'" y="'+padT+'" width="'+(iw/pts.length).toFixed(1)+'" height="'+ih+'" fill="transparent"/>';
+        dots += '<circle class="pf-dot" data-i="'+i+'" cx="'+x(i).toFixed(1)+'" cy="'+yM(p.mrr).toFixed(1)+'" r="3" fill="#fbbf24" opacity="0"/>';
+        dots += '<rect class="pf-hit" data-i="'+i+'" data-x="'+x(i).toFixed(1)+'" data-y="'+yM(p.mrr).toFixed(1)+'" data-mrr="'+p.mrr+'" data-arr="'+p.arr+'" data-date="'+p.date+'" x="'+(x(i)-(iw/pts.length/2)).toFixed(1)+'" y="'+padT+'" width="'+(iw/pts.length).toFixed(1)+'" height="'+ih+'" fill="transparent"/>';
       });
       return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">' +
         grid +
         '<defs><linearGradient id="pfg" x1="0" y1="0" x2="0" y2="1">' +
-          '<stop offset="0%" stop-color="#fbbf24" stop-opacity="0.28"/>' +
+          '<stop offset="0%" stop-color="#fbbf24" stop-opacity="0.24"/>' +
           '<stop offset="100%" stop-color="#fbbf24" stop-opacity="0"/>' +
         '</linearGradient></defs>' +
         '<path d="'+area+'" fill="url(#pfg)"/>' +
-        '<path d="'+line+'" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="'+mrrLine+'" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linejoin="round"/>' +
         dots +
         '</svg>';
     }
@@ -439,15 +453,26 @@
         return;
       }
       const all = mrrSnapshots;
-      const pts = all.slice(-mrrRange).map(r => ({ date: r.date, mrr: Number(r.mrr)||0, arr: Number(r.arr)||0 }));
+      const pts = all.slice(-mrrRange).map(r => ({ date: r.date, mrr: Number(r.mrr)||0, arr: Number(r.arr)||(Number(r.mrr)||0)*12 }));
       const latest = all[all.length-1];
       const curMrr = Number(latest.mrr)||0;
       const curArr = Number(latest.arr)||(curMrr*12);
-      const startMrr = pts.length ? pts[0].mrr : curMrr;
-      const deltaAbs = curMrr - startMrr;
-      const deltaPct = startMrr ? (deltaAbs/startMrr*100) : 0;
-      const dir = deltaAbs >= 0 ? "up" : "down";
-      const arrow = deltaAbs >= 0 ? "▲" : "▼";
+
+      // Period-over-period: current window = last N days; prior window = the N days before it.
+      // Net-new = end-of-window minus start-of-window (change across the period).
+      const curWin = all.slice(-mrrRange);
+      const priorWin = all.slice(-mrrRange*2, -mrrRange);
+      const winStartMrr = curWin.length ? (Number(curWin[0].mrr)||0) : curMrr;
+      const netNewMrr = curMrr - winStartMrr;
+      const netNewArr = netNewMrr * 12;
+      // prior window's net-new, for the "vs previous period" comparison
+      let priorNetMrr = null;
+      if (priorWin.length >= 2) priorNetMrr = (Number(priorWin[priorWin.length-1].mrr)||0) - (Number(priorWin[0].mrr)||0);
+      const netDir = netNewMrr >= 0 ? "up" : "down";
+      const netArrow = netNewMrr >= 0 ? "▲" : "▼";
+      // % of net-new vs prior window's net-new
+      let vsPriorPct = null;
+      if (priorNetMrr != null && Math.abs(priorNetMrr) > 0.01) vsPriorPct = (netNewMrr - priorNetMrr) / Math.abs(priorNetMrr) * 100;
 
       // staleness: latest snapshot older than 2 days => warn
       let staleHtml = "";
@@ -461,24 +486,48 @@
         '<button class="pf-range-btn ' + (r===mrrRange?"active":"") + '" onclick="setMrrRange('+r+')">'+r+'D</button>'
       ).join("");
 
-      // per-app breakdown from latest snapshot
+      // Per-app momentum: for each app, its MRR series across the current window → sparkline + delta.
       const perApp = latest.per_app || {};
-      const appRows = Object.keys(perApp)
-        .map(id => ({ id, name: APP_NAMES[id] || ("App " + id), mrr: Number(perApp[id])||0 }))
-        .filter(a => a.mrr > 0)
-        .sort((a,b) => b.mrr - a.mrr);
-      const maxApp = appRows.length ? appRows[0].mrr : 1;
+      const appIds = Object.keys(perApp).filter(id => (Number(perApp[id])||0) > 0);
+      const appRows = appIds.map(id => {
+        const series = curWin.map(r => Number((r.per_app||{})[id])||0);
+        const cur = Number(perApp[id])||0;
+        const first = series.find(v => v > 0) || series[0] || 0; // first nonzero (app may launch mid-window)
+        const dPct = first > 0 ? (cur - first)/first*100 : (cur > 0 ? 100 : 0);
+        return { id, name: APP_NAMES[id] || ("App "+id), mrr: cur, arr: cur*12, series, dPct };
+      }).sort((a,b) => b.mrr - a.mrr);
+
+      const sparkSvg = (series) => {
+        if (!series.length) return "";
+        const mn = Math.min(...series), mx = Math.max(...series), sp = (mx-mn)||1;
+        const W=120, H=26, pad=3;
+        const xs = i => (series.length<=1?W/2:(i/(series.length-1))*W);
+        const ys = v => pad + (H-2*pad) - ((v-mn)/sp)*(H-2*pad);
+        let d=""; series.forEach((v,i)=>{ d += (i===0?"M":"L")+xs(i).toFixed(1)+" "+ys(v).toFixed(1)+" "; });
+        const up = series[series.length-1] >= (series.find(v=>v>0)||series[0]||0);
+        const flat = Math.abs(series[series.length-1] - (series.find(v=>v>0)||series[0]||0)) < 0.01;
+        const col = flat ? "#666" : (up ? "#4ade80" : "#f87171");
+        return '<svg class="pf-spark" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'"><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="2" stroke-linejoin="round"/></svg>';
+      };
+      const deltaCls = (p) => Math.abs(p) < 1 ? "flat" : (p > 0 ? "up" : "down");
+      const deltaSym = (p) => Math.abs(p) < 1 ? "—" : (p > 0 ? "▲" : "▼");
       const appsHtml = appRows.map(a => {
         const share = curMrr ? (a.mrr/curMrr*100) : 0;
-        const barW = (a.mrr/maxApp*100).toFixed(1);
-        return '<div class="pf-app-row">' +
-          '<span class="pf-app-name">'+a.name+'</span>' +
-          '<div class="pf-app-bar-track"><div class="pf-app-bar" style="width:'+barW+'%"></div></div>' +
-          '<div><div class="pf-app-val">'+fmtMoney(a.mrr)+'</div><div class="pf-app-share">'+share.toFixed(0)+'%</div></div>' +
-        '</div>';
+        return '<tr>' +
+          '<td class="pf-t-app">'+a.name+'</td>' +
+          '<td class="pf-t-spark">'+sparkSvg(a.series)+'</td>' +
+          '<td class="pf-t-num r">'+fmtMoney(a.mrr)+'</td>' +
+          '<td class="pf-t-num r dim">'+fmtMoney(a.arr)+'</td>' +
+          '<td class="pf-t-num r dim">'+share.toFixed(0)+'%</td>' +
+          '<td class="r"><span class="pf-t-delta '+deltaCls(a.dPct)+'">'+deltaSym(a.dPct)+' '+Math.abs(Math.round(a.dPct))+'%</span></td>' +
+        '</tr>';
       }).join("");
 
       const chart = buildMrrChart(pts, 900, 260);
+
+      const vsPriorHtml = vsPriorPct != null
+        ? '<span class="pf-vs '+(vsPriorPct>=0?"up":"down")+'">'+(vsPriorPct>=0?"▲":"▼")+' '+Math.abs(Math.round(vsPriorPct))+'% vs prior '+mrrRange+'d</span>'
+        : '<span class="pf-vs dim">no prior '+mrrRange+'d</span>';
 
       container.innerHTML =
         staleHtml +
@@ -486,17 +535,26 @@
           '<div class="pf-big">' +
             '<div class="pf-metric"><div class="pf-m-label">Monthly Recurring Revenue</div>' +
               '<div class="pf-m-value mrr">'+fmtMoney(curMrr)+'</div>' +
-              '<div class="pf-m-sub '+dir+'">'+arrow+' '+fmtMoney(Math.abs(deltaAbs))+' ('+(deltaAbs>=0?"+":"")+deltaPct.toFixed(1)+'%) · '+mrrRange+'d</div>' +
+              '<div class="pf-m-sub '+netDir+'">'+netArrow+' '+(netNewMrr>=0?"+":"−")+fmtMoney(Math.abs(netNewMrr))+' net new · '+mrrRange+'d</div>' +
             '</div>' +
             '<div class="pf-metric"><div class="pf-m-label">Annual Recurring Revenue</div>' +
               '<div class="pf-m-value">'+fmtMoney(curArr)+'</div>' +
-              '<div class="pf-m-sub">as of '+latest.date+(latest.incomplete?" (partial)":"")+'</div>' +
+              '<div class="pf-m-sub '+netDir+'">'+netArrow+' '+(netNewArr>=0?"+":"−")+fmtMoney(Math.abs(netNewArr))+' net new · '+mrrRange+'d</div>' +
+            '</div>' +
+            '<div class="pf-metric"><div class="pf-m-label">Momentum</div>' +
+              '<div class="pf-m-value plain" style="font-size:26px">'+vsPriorHtml+'</div>' +
+              '<div class="pf-m-sub dim">as of '+latest.date+(latest.incomplete?" · partial":"")+'</div>' +
             '</div>' +
           '</div>' +
           '<div class="pf-ranges">'+rangeBtns+'</div>' +
         '</div>' +
+        '<div class="pf-legend"><span class="pf-lg"><i class="sw-mrr"></i>MRR (left axis)</span><span class="pf-lg"><i class="sw-arr"></i>ARR ×12 (right axis)</span></div>' +
         '<div class="pf-chart-wrap" id="pfChartWrap">'+chart+'<div class="pf-tip" id="pfTip"></div></div>' +
-        '<div class="pf-apps"><h3>MRR by app · '+latest.date+'</h3>'+appsHtml+'</div>';
+        '<div class="pf-apps"><h3>By app · '+latest.date+'</h3>' +
+          '<table class="pf-table"><thead><tr>' +
+            '<th>App</th><th>Trend · '+mrrRange+'d</th><th class="r">MRR</th><th class="r">ARR</th><th class="r">Share</th><th class="r">Δ '+mrrRange+'d</th>' +
+          '</tr></thead><tbody>'+appsHtml+'</tbody></table>' +
+        '</div>';
 
       // wire chart hover
       const wrap = document.getElementById("pfChartWrap");
@@ -508,6 +566,7 @@
           const dot = wrap.querySelector('.pf-dot[data-i="'+i+'"]');
           if (dot) dot.setAttribute("opacity","1");
           const mrr = Number(hit.dataset.mrr);
+          const arr = Number(hit.dataset.arr) || mrr*12;
           // convert svg coords to px within wrap
           const vb = svg.viewBox.baseVal;
           const rect = svg.getBoundingClientRect();
@@ -515,7 +574,7 @@
           const py = (Number(hit.dataset.y)/vb.height)*rect.height;
           tip.style.left = px + "px";
           tip.style.top = py + "px";
-          tip.innerHTML = '<div class="t-date">'+hit.dataset.date+'</div><div class="t-mrr">'+fmtMoney(mrr)+' MRR</div>';
+          tip.innerHTML = '<div class="t-date">'+hit.dataset.date+'</div><div class="t-mrr">'+fmtMoney(mrr)+' MRR</div><div class="t-arr">'+fmtMoney(arr)+' ARR</div>';
           tip.style.opacity = "1";
         });
         hit.addEventListener("mouseleave", () => {
