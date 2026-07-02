@@ -753,14 +753,21 @@ const CHURN_WEEKS = 14; // how many weekly cohorts to return (client windows fur
 // D30+ keeps accruing forever; treat 45d as settled enough to show.
 const BUCKET_MATURITY_DAYS = { d0: 1, d1_7: 8, d8_30: 31, d30plus: 45 };
 
-async function fetchChurnCohorts(appId) {
+async function fetchChurnCohorts(appId, plan) {
   const appFilter = "applicationId = " + Number(appId);
+  // Only weekly or annual are sold: annual/year keyword → annual, everything else → weekly.
+  // plan filter applied via HAVING on the classified plan.
+  const planHaving = plan === "annual" ? "HAVING sub_plan = 'annual'"
+    : plan === "weekly" ? "HAVING sub_plan = 'weekly'"
+    : "";
   const sql = `
 WITH subs AS (
-  SELECT originalTransactionId AS otid, min(toDate(purchasedAt)) AS start_day
+  SELECT originalTransactionId AS otid, min(toDate(purchasedAt)) AS start_day,
+    if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS sub_plan
   FROM open_revenue.attributed_events_by_ts_rep
   WHERE ${appFilter} AND isSandbox=0 AND name='initial_purchase' AND originalTransactionId!=''
   GROUP BY otid
+  ${planHaving}
 ),
 cancels AS (
   SELECT originalTransactionId AS otid, min(toDate(ts)) AS cancel_day
@@ -800,7 +807,7 @@ FORMAT JSONEachRow`.trim();
       d30plus: gated(r.d30plus, "d30plus"),
     };
   });
-  return { appId: Number(appId), cohorts, generatedAt: new Date().toISOString() };
+  return { appId: Number(appId), plan: plan || "all", cohorts, generatedAt: new Date().toISOString() };
 }
 
 functions.http("churnCohorts", async (req, res) => {
@@ -840,14 +847,17 @@ functions.http("churnCohorts", async (req, res) => {
       return res.status(400).json({ error: "appId required" });
     }
     const appId = Number(appIdRaw);
+    const planRaw = String(req.query.plan || "all").toLowerCase();
+    const plan = ["all", "weekly", "annual"].includes(planRaw) ? planRaw : "all";
+    const cacheKey = appId + "|" + plan;
     const now = Date.now();
-    const hit = churnCache.get(appId);
+    const hit = churnCache.get(cacheKey);
     if (hit && (now - hit.ts) < CHURN_CACHE_TTL_MS) {
       res.set("X-Cache", "HIT");
       return res.status(200).json(hit.data);
     }
-    const data = await fetchChurnCohorts(appId);
-    churnCache.set(appId, { ts: now, data });
+    const data = await fetchChurnCohorts(appId, plan === "all" ? null : plan);
+    churnCache.set(cacheKey, { ts: now, data });
     res.set("X-Cache", "MISS");
     return res.status(200).json(data);
   } catch (err) {

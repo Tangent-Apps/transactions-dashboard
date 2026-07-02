@@ -660,28 +660,32 @@
     const CHURN_WINDOWS = [30, 60, 90, 0]; // 0 = All
     let churnWindow = 60;                  // default weeks shown ≈ 60 days
     window.setChurnWindow = function(w) { churnWindow = w; renderChurn(); };
+    const CHURN_PLANS = [["all","All"],["weekly","Weekly"],["annual","Annual"]];
+    let churnPlan = "all";
+    window.setChurnPlan = function(p) { churnPlan = p; renderChurn(); loadChurn(); };
     let churnApp = "32830";
-    let churnData = {};      // appId → { cohorts, generatedAt }
-    let churnInflight = {};   // appId → true while its fetch is running
+    let churnData = {};      // "appId|plan" → { cohorts, ... }
+    let churnInflight = {};   // "appId|plan" → true while its fetch is running
     let churnError = null;
     window.setChurnApp = function(id) { churnApp = id; renderChurn(); loadChurn(); };
+    function churnKey() { return churnApp + "|" + churnPlan; }
 
     async function loadChurn() {
-      const app = churnApp;              // capture — churnApp may change mid-fetch
-      if (churnData[app] || churnInflight[app]) return; // cached or already loading THIS app
-      churnInflight[app] = true; churnError = null;
+      const key = churnKey();            // capture — app/plan may change mid-fetch
+      if (churnData[key] || churnInflight[key]) return; // cached or already loading
+      churnInflight[key] = true; churnError = null;
       try {
         const user = auth.currentUser;
         if (!user) throw new Error("not signed in");
         const idToken = await user.getIdToken();
-        const r = await fetch(CHURN_FN_URL + "?appId=" + app, { headers: { Authorization: "Bearer " + idToken } });
+        const r = await fetch(CHURN_FN_URL + "?appId=" + churnApp + "&plan=" + churnPlan, { headers: { Authorization: "Bearer " + idToken } });
         if (!r.ok) throw new Error("fetch " + r.status + ": " + (await r.text()).slice(0,120));
-        churnData[app] = await r.json();
+        churnData[key] = await r.json();
       } catch (e) {
         console.warn("churn load failed", e);
         churnError = e.message;
       } finally {
-        delete churnInflight[app];
+        delete churnInflight[key];
         if (section === "churn") renderChurn();
       }
     }
@@ -748,14 +752,17 @@
       const winBtns = CHURN_WINDOWS.map(w =>
         '<button class="pf-range-btn '+(w===churnWindow?"active":"")+'" onclick="setChurnWindow('+w+')">'+(w===0?"All":w+"D")+'</button>'
       ).join("");
+      const planBtns = CHURN_PLANS.map(([id,name]) =>
+        '<button class="pf-range-btn '+(id===churnPlan?"active":"")+'" onclick="setChurnPlan(\''+id+'\')">'+name+'</button>'
+      ).join("");
       const header =
         '<div class="pf-head"><div><div class="pf-m-label">Cancellation cohorts · weekly</div>' +
           '<div class="ch-sub">Weekly cohorts by signup week. Each line = % who cancelled in that time window. Hover for details.</div></div>' +
-          '<div class="ch-controls"><div class="pf-ranges ch-apps">'+appBtns+'</div><div class="pf-ranges">'+winBtns+'</div></div>' +
+          '<div class="ch-controls"><div class="pf-ranges ch-apps">'+appBtns+'</div><div class="pf-ranges ch-plans">'+planBtns+'</div><div class="pf-ranges">'+winBtns+'</div></div>' +
         '</div>';
 
-      const d = churnData[churnApp];
-      if (!d && churnInflight[churnApp]) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
+      const d = churnData[churnKey()];
+      if (!d && churnInflight[churnKey()]) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
       if (churnError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load churn</h2><p>'+churnError+'</p></div>'; return; }
       if (!d) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
       let cohorts = (d.cohorts||[]).filter(c => c.size > 0);
