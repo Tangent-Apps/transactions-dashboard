@@ -207,6 +207,8 @@ functions.http("dashboardAuth", async (req, res) => {
   const origin = req.headers.origin || "";
   const allowedOrigins = [
     "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
     "http://localhost:5173",
     "http://localhost:8000",
   ];
@@ -601,6 +603,8 @@ functions.http("superwallStats", async (req, res) => {
   const origin = req.headers.origin || "";
   const allowedOrigins = [
     "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
     "http://localhost:5173",
     "http://localhost:8000",
   ];
@@ -687,6 +691,8 @@ functions.http("userLifetime", async (req, res) => {
   const origin = req.headers.origin || "";
   const allowedOrigins = [
     "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
     "http://localhost:5173",
     "http://localhost:8000",
   ];
@@ -799,6 +805,8 @@ functions.http("churnCohorts", async (req, res) => {
   const origin = req.headers.origin || "";
   const allowedOrigins = [
     "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
     "http://localhost:5173",
     "http://localhost:8000",
     "http://localhost:8899",

@@ -2,5 +2,19 @@
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
+  },
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      ".firebaserc",
+      ".git/**",
+      ".github/**",
+      "functions/**",
+      "firestore.rules",
+      "firestore.indexes.json",
+      "*.md",
+      "**/.*"
+    ]
   }
 }
