@@ -31,6 +31,14 @@
     .filter-btn:hover { border-color: #444; color: #ccc; }
     .filter-btn.active { background: #fff; color: #000; border-color: #fff; font-weight: 500; }
 
+    /* Primary section nav — Activity | Revenue */
+    .section-nav { display: flex; gap: 4px; flex-shrink: 0; background: #101010; border: 1px solid #262626; border-radius: 9px; padding: 3px; }
+    .section-btn { padding: 6px 15px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; background: transparent; color: #777; border-radius: 6px; transition: all 0.15s; white-space: nowrap; letter-spacing: -0.01em; }
+    .section-btn:hover { color: #bbb; }
+    .section-btn.active { background: #232323; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
+
+    /* Activity sub-controls (Live/History) — subordinate to section nav */
+    .activity-controls { display: flex; flex-shrink: 0; }
     /* Live/History toggle */
     .view-toggle { display: flex; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 7px; overflow: hidden; flex-shrink: 0; }
     .toggle-btn { padding: 5px 12px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: transparent; color: #555; transition: all 0.2s; white-space: nowrap; }
@@ -112,7 +120,6 @@
     .day-summary .breakdown .b-refund { color: #f5a07a; }
 
     /* Portfolio (MRR) view */
-    .toggle-btn.portfolio-active { background: #2a2416; color: #fbbf24; }
     .pf-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
     .pf-big { display: flex; gap: 34px; flex-wrap: wrap; }
     .pf-metric .pf-m-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
@@ -177,11 +184,16 @@
   <div class="toolbar">
     <span class="brand"><span class="live-dot"></span> Transactions</span>
     <div class="filters-wrap"><div class="filters" id="filters"><button class="filter-btn active" data-app="all">All</button></div></div>
-    <div class="view-toggle">
-      <button class="toggle-btn live-active" id="toggleLive" onclick="setViewMode('live')">Live</button>
-      <button class="toggle-btn" id="toggleHistory" onclick="setViewMode('history')">History</button>
-      <button class="toggle-btn" id="togglePortfolio" onclick="setViewMode('portfolio')">Portfolio</button>
+    <div class="activity-controls" id="activityControls">
+      <div class="view-toggle">
+        <button class="toggle-btn live-active" id="toggleLive" onclick="setActivityMode('live')">Live</button>
+        <button class="toggle-btn" id="toggleHistory" onclick="setActivityMode('history')">History</button>
+      </div>
     </div>
+    <nav class="section-nav">
+      <button class="section-btn active" id="sectionActivity" onclick="setSection('activity')">Activity</button>
+      <button class="section-btn" id="sectionRevenue" onclick="setSection('revenue')">Revenue</button>
+    </nav>
   </div>
 
   <div class="container" id="container">
@@ -285,7 +297,8 @@
     const PAGE_SIZE = 50;
     let lastDoc = null;
     let currentApp = "all";
-    let viewMode = "live";
+    let section = "activity";   // activity | revenue
+    let viewMode = "live";       // live | history — the Activity sub-mode
     let allTxs = [];
     let knownApps = new Set();
 
@@ -347,12 +360,21 @@
       }
     }
 
-    window.setViewMode = function(mode) {
+    window.setSection = function(sec) {
+      section = sec;
+      document.getElementById("sectionActivity").className = "section-btn" + (sec === "activity" ? " active" : "");
+      document.getElementById("sectionRevenue").className = "section-btn" + (sec === "revenue" ? " active" : "");
+      // Activity-only controls (app filter + Live/History) hide on Revenue
+      document.getElementById("activityControls").style.display = sec === "activity" ? "" : "none";
+      document.getElementById("filters").parentElement.style.display = sec === "activity" ? "" : "none";
+      if (sec === "revenue") { renderPortfolio(); loadMrrSnapshots(); return; }
+      renderAll();
+    };
+
+    window.setActivityMode = function(mode) {
       viewMode = mode;
       document.getElementById("toggleLive").className = "toggle-btn" + (mode === "live" ? " live-active" : "");
       document.getElementById("toggleHistory").className = "toggle-btn" + (mode === "history" ? " history-active" : "");
-      document.getElementById("togglePortfolio").className = "toggle-btn" + (mode === "portfolio" ? " portfolio-active" : "");
-      if (mode === "portfolio") { renderPortfolio(); loadMrrSnapshots(); return; }
       renderAll();
     };
 
@@ -384,7 +406,7 @@
         mrrSnapshots = [];
       } finally {
         mrrLoading = false;
-        if (viewMode === "portfolio") renderPortfolio();
+        if (section === "revenue") renderPortfolio();
       }
     }
 
@@ -874,6 +896,7 @@
     }
 
     function renderAll() {
+      if (section !== "activity") return; // Revenue view owns the container; don't clobber it
       const container = document.getElementById("container");
       const filtered = getFilteredTxs();
 
