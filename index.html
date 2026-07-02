@@ -111,6 +111,34 @@
     .day-summary .breakdown .b-renew { color: #c084fc; }
     .day-summary .breakdown .b-refund { color: #f5a07a; }
 
+    /* Portfolio (MRR) view */
+    .toggle-btn.portfolio-active { background: #2a2416; color: #fbbf24; }
+    .pf-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+    .pf-big { display: flex; gap: 34px; flex-wrap: wrap; }
+    .pf-metric .pf-m-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
+    .pf-metric .pf-m-value { font-size: 38px; font-weight: 800; color: #fff; line-height: 1.05; margin-top: 4px; letter-spacing: -0.5px; }
+    .pf-metric .pf-m-value.mrr { color: #fbbf24; }
+    .pf-metric .pf-m-sub { font-size: 12px; margin-top: 5px; color: #888; font-weight: 600; }
+    .pf-metric .pf-m-sub.up { color: #4ade80; }
+    .pf-metric .pf-m-sub.down { color: #f87171; }
+    .pf-ranges { display: flex; gap: 6px; background: #141414; border: 1px solid #232323; border-radius: 9px; padding: 4px; }
+    .pf-range-btn { padding: 6px 13px; font-size: 12px; font-weight: 600; border: none; background: transparent; color: #666; border-radius: 6px; cursor: pointer; transition: all 0.15s; }
+    .pf-range-btn.active { background: #2a2416; color: #fbbf24; }
+    .pf-chart-wrap { background: #131313; border: 1px solid #232323; border-radius: 14px; padding: 18px 16px 8px; margin-bottom: 18px; position: relative; }
+    .pf-chart-wrap svg { width: 100%; height: auto; display: block; overflow: visible; }
+    .pf-tip { position: absolute; pointer-events: none; background: #000; border: 1px solid #333; border-radius: 7px; padding: 6px 9px; font-size: 11px; color: #fff; white-space: nowrap; opacity: 0; transition: opacity 0.1s; z-index: 5; transform: translate(-50%, -115%); }
+    .pf-tip .t-date { color: #888; font-size: 10px; }
+    .pf-tip .t-mrr { color: #fbbf24; font-weight: 700; }
+    .pf-apps { background: #131313; border: 1px solid #232323; border-radius: 14px; padding: 16px; }
+    .pf-apps h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #999; font-weight: 700; margin-bottom: 12px; }
+    .pf-app-row { display: grid; grid-template-columns: 150px 1fr 90px; gap: 12px; align-items: center; padding: 6px 0; }
+    .pf-app-name { font-size: 12px; color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pf-app-bar-track { background: #1e1e1e; border-radius: 5px; height: 10px; overflow: hidden; }
+    .pf-app-bar { background: linear-gradient(90deg, #b45309, #fbbf24); height: 100%; border-radius: 5px; }
+    .pf-app-val { font-size: 12px; font-weight: 700; color: #fff; text-align: right; }
+    .pf-app-share { font-size: 10px; color: #777; }
+    .pf-stale { font-size: 11px; color: #f5a07a; margin-bottom: 12px; }
+
     .show-more { display: block; width: 100%; padding: 12px; margin: 16px 0; background: #1a1a1a; border: 1px solid #232323; border-radius: 10px; color: #aaa; font-size: 13px; cursor: pointer; }
     .show-more:hover { background: #222; color: #fff; }
     .empty-state { text-align: center; padding: 60px 20px; color: #555; }
@@ -137,6 +165,7 @@
     <div class="view-toggle">
       <button class="toggle-btn live-active" id="toggleLive" onclick="setViewMode('live')">Live</button>
       <button class="toggle-btn" id="toggleHistory" onclick="setViewMode('history')">History</button>
+      <button class="toggle-btn" id="togglePortfolio" onclick="setViewMode('portfolio')">Portfolio</button>
     </div>
   </div>
 
@@ -307,8 +336,196 @@
       viewMode = mode;
       document.getElementById("toggleLive").className = "toggle-btn" + (mode === "live" ? " live-active" : "");
       document.getElementById("toggleHistory").className = "toggle-btn" + (mode === "history" ? " history-active" : "");
+      document.getElementById("togglePortfolio").className = "toggle-btn" + (mode === "portfolio" ? " portfolio-active" : "");
+      if (mode === "portfolio") { renderPortfolio(); loadMrrSnapshots(); return; }
       renderAll();
     };
+
+    // ---- Portfolio (MRR / ARR) ----
+    const APP_NAMES = {
+      "22372":"GirlTalk","22373":"Solo Girlies","23873":"Therapy Girlies","23954":"Spicy Stories",
+      "24574":"Hola","28209":"Christian Daily Tasks","29053":"Christian Music AI","38342":"Christian Music (Android)",
+      "31709":"Speak & Learn Spanish","32829":"Better Stretch","32830":"GirlWalk","35269":"Poly AI",
+      "41169":"Better Breath","42734":"Quit Alcohol","43349":"Yarn AI","44197":"Baby Food Scan",
+      "45833":"Sync: Women's Health","46586":"Woman Faith Tasks","47318":"LCKR","47554":"PollyChat","48516":"GirlTasks"
+    };
+    let mrrSnapshots = null;       // sorted asc array of {date, mrr, arr, per_app, incomplete}
+    let mrrLoading = false;
+    let mrrRange = 30;             // 7 | 30 | 60 | 90
+    window.setMrrRange = function(r) { mrrRange = r; renderPortfolio(); };
+
+    async function loadMrrSnapshots() {
+      if (mrrLoading || mrrSnapshots) return;
+      mrrLoading = true;
+      try {
+        const q = query(collection(db, "mrr_snapshots"), orderBy("date", "desc"), limit(120));
+        const snap = await getDocs(q);
+        const rows = [];
+        snap.forEach(d => rows.push(d.data()));
+        rows.reverse(); // ascending by date
+        mrrSnapshots = rows;
+      } catch (e) {
+        console.error("mrr load failed", e);
+        mrrSnapshots = [];
+      } finally {
+        mrrLoading = false;
+        if (viewMode === "portfolio") renderPortfolio();
+      }
+    }
+
+    function fmtMoney(n) {
+      const v = Math.round(Number(n) || 0);
+      return "$" + v.toLocaleString("en-US");
+    }
+
+    function buildMrrChart(pts, w, h) {
+      // pts: [{date, mrr}] ascending. Returns SVG string.
+      const padL = 8, padR = 8, padT = 12, padB = 22;
+      const iw = w - padL - padR, ih = h - padT - padB;
+      const vals = pts.map(p => p.mrr);
+      const min = Math.min(...vals), max = Math.max(...vals);
+      const span = (max - min) || 1;
+      const lo = min - span * 0.12, hi = max + span * 0.12;
+      const rng = (hi - lo) || 1;
+      const x = i => padL + (pts.length <= 1 ? iw/2 : (i/(pts.length-1))*iw);
+      const y = v => padT + ih - ((v - lo)/rng)*ih;
+      let line = "", area = "";
+      pts.forEach((p,i) => {
+        const px = x(i).toFixed(1), py = y(p.mrr).toFixed(1);
+        line += (i===0?"M":"L") + px + " " + py + " ";
+      });
+      area = line + "L" + x(pts.length-1).toFixed(1) + " " + (padT+ih) + " L" + x(0).toFixed(1) + " " + (padT+ih) + " Z";
+      // gridlines: 4 horizontal
+      let grid = "";
+      for (let g=0; g<=3; g++) {
+        const gv = lo + (rng*g/3);
+        const gy = y(gv).toFixed(1);
+        grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="#1f1f1f" stroke-width="1"/>';
+        grid += '<text x="'+(w-padR)+'" y="'+(gy-3)+'" fill="#555" font-size="9" text-anchor="end">'+fmtMoney(gv)+'</text>';
+      }
+      // x labels: first, middle, last
+      const idxs = pts.length > 2 ? [0, Math.floor(pts.length/2), pts.length-1] : pts.map((_,i)=>i);
+      let xlab = "";
+      idxs.forEach(i => {
+        const d = pts[i].date.slice(5); // MM-DD
+        xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-6)+'" fill="#666" font-size="9" text-anchor="middle">'+d+'</text>';
+      });
+      // hover dots (interactive points)
+      let dots = "";
+      pts.forEach((p,i) => {
+        dots += '<circle class="pf-dot" data-i="'+i+'" cx="'+x(i).toFixed(1)+'" cy="'+y(p.mrr).toFixed(1)+'" r="3" fill="#fbbf24" opacity="0"/>';
+        dots += '<rect class="pf-hit" data-i="'+i+'" data-x="'+x(i).toFixed(1)+'" data-y="'+y(p.mrr).toFixed(1)+'" data-mrr="'+p.mrr+'" data-date="'+p.date+'" x="'+(x(i)-(iw/pts.length/2)).toFixed(1)+'" y="'+padT+'" width="'+(iw/pts.length).toFixed(1)+'" height="'+ih+'" fill="transparent"/>';
+      });
+      return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">' +
+        grid +
+        '<defs><linearGradient id="pfg" x1="0" y1="0" x2="0" y2="1">' +
+          '<stop offset="0%" stop-color="#fbbf24" stop-opacity="0.28"/>' +
+          '<stop offset="100%" stop-color="#fbbf24" stop-opacity="0"/>' +
+        '</linearGradient></defs>' +
+        '<path d="'+area+'" fill="url(#pfg)"/>' +
+        '<path d="'+line+'" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linejoin="round"/>' +
+        dots +
+        '</svg>';
+    }
+
+    function renderPortfolio() {
+      const container = document.getElementById("container");
+      if (!mrrSnapshots) {
+        container.innerHTML = '<div class="loading">Loading MRR…</div>';
+        return;
+      }
+      if (mrrSnapshots.length === 0) {
+        container.innerHTML = '<div class="empty-state"><h2>No MRR data yet</h2><p>Snapshots will appear once the daily job runs.</p></div>';
+        return;
+      }
+      const all = mrrSnapshots;
+      const pts = all.slice(-mrrRange).map(r => ({ date: r.date, mrr: Number(r.mrr)||0, arr: Number(r.arr)||0 }));
+      const latest = all[all.length-1];
+      const curMrr = Number(latest.mrr)||0;
+      const curArr = Number(latest.arr)||(curMrr*12);
+      const startMrr = pts.length ? pts[0].mrr : curMrr;
+      const deltaAbs = curMrr - startMrr;
+      const deltaPct = startMrr ? (deltaAbs/startMrr*100) : 0;
+      const dir = deltaAbs >= 0 ? "up" : "down";
+      const arrow = deltaAbs >= 0 ? "▲" : "▼";
+
+      // staleness: latest snapshot older than 2 days => warn
+      let staleHtml = "";
+      const todayKey = new Date().toISOString().slice(0,10);
+      const daysBehind = Math.round((Date.parse(todayKey) - Date.parse(latest.date)) / 86400000);
+      if (daysBehind >= 2) {
+        staleHtml = '<div class="pf-stale">⚠ Latest snapshot is ' + latest.date + ' (' + daysBehind + ' days behind). Daily job may not have run.</div>';
+      }
+
+      const rangeBtns = [7,30,60,90].map(r =>
+        '<button class="pf-range-btn ' + (r===mrrRange?"active":"") + '" onclick="setMrrRange('+r+')">'+r+'D</button>'
+      ).join("");
+
+      // per-app breakdown from latest snapshot
+      const perApp = latest.per_app || {};
+      const appRows = Object.keys(perApp)
+        .map(id => ({ id, name: APP_NAMES[id] || ("App " + id), mrr: Number(perApp[id])||0 }))
+        .filter(a => a.mrr > 0)
+        .sort((a,b) => b.mrr - a.mrr);
+      const maxApp = appRows.length ? appRows[0].mrr : 1;
+      const appsHtml = appRows.map(a => {
+        const share = curMrr ? (a.mrr/curMrr*100) : 0;
+        const barW = (a.mrr/maxApp*100).toFixed(1);
+        return '<div class="pf-app-row">' +
+          '<span class="pf-app-name">'+a.name+'</span>' +
+          '<div class="pf-app-bar-track"><div class="pf-app-bar" style="width:'+barW+'%"></div></div>' +
+          '<div><div class="pf-app-val">'+fmtMoney(a.mrr)+'</div><div class="pf-app-share">'+share.toFixed(0)+'%</div></div>' +
+        '</div>';
+      }).join("");
+
+      const chart = buildMrrChart(pts, 900, 260);
+
+      container.innerHTML =
+        staleHtml +
+        '<div class="pf-head">' +
+          '<div class="pf-big">' +
+            '<div class="pf-metric"><div class="pf-m-label">Monthly Recurring Revenue</div>' +
+              '<div class="pf-m-value mrr">'+fmtMoney(curMrr)+'</div>' +
+              '<div class="pf-m-sub '+dir+'">'+arrow+' '+fmtMoney(Math.abs(deltaAbs))+' ('+(deltaAbs>=0?"+":"")+deltaPct.toFixed(1)+'%) · '+mrrRange+'d</div>' +
+            '</div>' +
+            '<div class="pf-metric"><div class="pf-m-label">Annual Recurring Revenue</div>' +
+              '<div class="pf-m-value">'+fmtMoney(curArr)+'</div>' +
+              '<div class="pf-m-sub">as of '+latest.date+(latest.incomplete?" (partial)":"")+'</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="pf-ranges">'+rangeBtns+'</div>' +
+        '</div>' +
+        '<div class="pf-chart-wrap" id="pfChartWrap">'+chart+'<div class="pf-tip" id="pfTip"></div></div>' +
+        '<div class="pf-apps"><h3>MRR by app · '+latest.date+'</h3>'+appsHtml+'</div>';
+
+      // wire chart hover
+      const wrap = document.getElementById("pfChartWrap");
+      const tip = document.getElementById("pfTip");
+      const svg = wrap.querySelector("svg");
+      wrap.querySelectorAll(".pf-hit").forEach(hit => {
+        hit.addEventListener("mouseenter", () => {
+          const i = hit.dataset.i;
+          const dot = wrap.querySelector('.pf-dot[data-i="'+i+'"]');
+          if (dot) dot.setAttribute("opacity","1");
+          const mrr = Number(hit.dataset.mrr);
+          // convert svg coords to px within wrap
+          const vb = svg.viewBox.baseVal;
+          const rect = svg.getBoundingClientRect();
+          const px = (Number(hit.dataset.x)/vb.width)*rect.width;
+          const py = (Number(hit.dataset.y)/vb.height)*rect.height;
+          tip.style.left = px + "px";
+          tip.style.top = py + "px";
+          tip.innerHTML = '<div class="t-date">'+hit.dataset.date+'</div><div class="t-mrr">'+fmtMoney(mrr)+' MRR</div>';
+          tip.style.opacity = "1";
+        });
+        hit.addEventListener("mouseleave", () => {
+          const i = hit.dataset.i;
+          const dot = wrap.querySelector('.pf-dot[data-i="'+i+'"]');
+          if (dot) dot.setAttribute("opacity","0");
+          tip.style.opacity = "0";
+        });
+      });
+    }
 
     window.copyTxId = function(fullId, el, ev) {
       if (ev) ev.stopPropagation();
