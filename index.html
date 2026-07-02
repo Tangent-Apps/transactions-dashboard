@@ -383,7 +383,7 @@
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
       if (sec === "revenue") { renderPortfolio(); loadMrrSnapshots(); return; }
-      if (sec === "churn") { renderChurn(); return; }
+      if (sec === "churn") { renderChurn(); loadChurn(); return; }
       renderAll();
     };
 
@@ -639,26 +639,26 @@
     ];
     let churnApp = "32830";
     let churnData = {};      // appId → { cohorts, generatedAt }
-    let churnLoading = false;
+    let churnInflight = {};   // appId → true while its fetch is running
     let churnError = null;
     window.setChurnApp = function(id) { churnApp = id; renderChurn(); loadChurn(); };
 
     async function loadChurn() {
-      if (churnLoading) return;
-      if (churnData[churnApp]) return; // cached in-memory
-      churnLoading = true; churnError = null;
+      const app = churnApp;              // capture — churnApp may change mid-fetch
+      if (churnData[app] || churnInflight[app]) return; // cached or already loading THIS app
+      churnInflight[app] = true; churnError = null;
       try {
         const user = auth.currentUser;
         if (!user) throw new Error("not signed in");
         const idToken = await user.getIdToken();
-        const r = await fetch(CHURN_FN_URL + "?appId=" + churnApp, { headers: { Authorization: "Bearer " + idToken } });
+        const r = await fetch(CHURN_FN_URL + "?appId=" + app, { headers: { Authorization: "Bearer " + idToken } });
         if (!r.ok) throw new Error("fetch " + r.status + ": " + (await r.text()).slice(0,120));
-        churnData[churnApp] = await r.json();
+        churnData[app] = await r.json();
       } catch (e) {
         console.warn("churn load failed", e);
         churnError = e.message;
       } finally {
-        churnLoading = false;
+        delete churnInflight[app];
         if (section === "churn") renderChurn();
       }
     }
@@ -716,7 +716,7 @@
         '</div>';
 
       const d = churnData[churnApp];
-      if (!d && churnLoading) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
+      if (!d && churnInflight[churnApp]) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
       if (churnError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load churn</h2><p>'+churnError+'</p></div>'; return; }
       if (!d) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
       const cohorts = (d.cohorts||[]).filter(c => c.size > 0);
