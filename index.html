@@ -166,6 +166,14 @@
     .pf-t-delta.up { color: #4ade80; } .pf-t-delta.down { color: #f87171; } .pf-t-delta.flat { color: #666; }
     .pf-stale { font-size: 11px; color: #f5a07a; margin-bottom: 12px; }
 
+    /* Churn view */
+    .ch-sub { font-size: 12px; color: #888; margin-top: 5px; max-width: 62ch; line-height: 1.5; }
+    .ch-apps { flex-wrap: wrap; }
+    .ch-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; padding: 0 14px; font-size: 11px; color: #999; }
+    .ch-legend .ch-lg { display: flex; align-items: center; gap: 6px; }
+    .ch-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+    .ch-foot { font-size: 11px; color: #666; margin-top: 12px; line-height: 1.5; }
+
     .show-more { display: block; width: 100%; padding: 12px; margin: 16px 0; background: #1a1a1a; border: 1px solid #232323; border-radius: 10px; color: #aaa; font-size: 13px; cursor: pointer; }
     .show-more:hover { background: #222; color: #fff; }
     .empty-state { text-align: center; padding: 60px 20px; color: #555; }
@@ -198,6 +206,7 @@
     <nav class="section-nav">
       <button class="section-btn active" id="sectionActivity" onclick="setSection('activity')">Activity</button>
       <button class="section-btn" id="sectionRevenue" onclick="setSection('revenue')">Revenue</button>
+      <button class="section-btn" id="sectionChurn" onclick="setSection('churn')">Churn</button>
     </nav>
   </div>
 
@@ -369,10 +378,12 @@
       section = sec;
       document.getElementById("sectionActivity").className = "section-btn" + (sec === "activity" ? " active" : "");
       document.getElementById("sectionRevenue").className = "section-btn" + (sec === "revenue" ? " active" : "");
-      // Activity-only controls hide on Revenue via visibility (keeps the grid
+      document.getElementById("sectionChurn").className = "section-btn" + (sec === "churn" ? " active" : "");
+      // Activity-only controls hide off Activity via visibility (keeps the grid
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
       if (sec === "revenue") { renderPortfolio(); loadMrrSnapshots(); return; }
+      if (sec === "churn") { renderChurn(); return; }
       renderAll();
     };
 
@@ -611,6 +622,125 @@
           tip.style.opacity = "0";
         });
       });
+    }
+
+    // ---- Churn (cancellation cohorts) ----
+    const CHURN_FN_URL = "https://us-central1-tangent-transactions-dashboard.cloudfunctions.net/churnCohorts";
+    // Apps with meaningful sub volume, ordered by size. id → label.
+    const CHURN_APPS = [
+      ["32830","GirlWalk"],["22372","GirlTalk"],["28209","Christian Daily Tasks"],
+      ["35269","Poly AI"],["29053","Christian Music AI"],["23954","Spicy Stories"],
+    ];
+    // Bucket definitions: key, label, color, order back-to-front.
+    const CHURN_BUCKETS = [
+      { key:"d0",     label:"Day 0",   color:"#f87171" },
+      { key:"d1",     label:"Day 1",   color:"#fb923c" },
+      { key:"d3",     label:"Days 2–3",color:"#fbbf24" },
+      { key:"d7",     label:"Days 4–7",color:"#a3e635" },
+      { key:"d7plus", label:"Day 8+",  color:"#4ade80" },
+    ];
+    let churnApp = "32830";
+    let churnData = {};      // appId → { cohorts, generatedAt }
+    let churnLoading = false;
+    let churnError = null;
+    window.setChurnApp = function(id) { churnApp = id; renderChurn(); loadChurn(); };
+
+    async function loadChurn() {
+      if (churnLoading) return;
+      if (churnData[churnApp]) return; // cached in-memory
+      churnLoading = true; churnError = null;
+      try {
+        const user = auth.currentUser;
+        if (!user) throw new Error("not signed in");
+        const idToken = await user.getIdToken();
+        const r = await fetch(CHURN_FN_URL + "?appId=" + churnApp, { headers: { Authorization: "Bearer " + idToken } });
+        if (!r.ok) throw new Error("fetch " + r.status + ": " + (await r.text()).slice(0,120));
+        churnData[churnApp] = await r.json();
+      } catch (e) {
+        console.warn("churn load failed", e);
+        churnError = e.message;
+      } finally {
+        churnLoading = false;
+        if (section === "churn") renderChurn();
+      }
+    }
+
+    function buildChurnChart(cohorts, w, h) {
+      const padL = 40, padR = 14, padT = 14, padB = 26;
+      const iw = w - padL - padR, ih = h - padT - padB;
+      const n = cohorts.length;
+      // y max = max non-null bucket value across all cohorts (with headroom)
+      let maxV = 0;
+      cohorts.forEach(c => CHURN_BUCKETS.forEach(b => { const v=c[b.key]; if (v!=null && v>maxV) maxV=v; }));
+      const hi = Math.max(5, Math.ceil(maxV/5)*5 + 5);
+      const x = i => padL + (n<=1 ? iw/2 : (i/(n-1))*iw);
+      const y = v => padT + ih - (v/hi)*ih;
+
+      // gridlines + y labels (%)
+      let grid = "";
+      for (let g=0; g<=4; g++) {
+        const gv = hi*g/4, gy = y(gv).toFixed(1);
+        grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="#1f1f1f" stroke-width="1"/>';
+        grid += '<text x="'+(padL-6)+'" y="'+(Number(gy)+3)+'" fill="#555" font-size="9" text-anchor="end">'+gv.toFixed(0)+'%</text>';
+      }
+      // x labels: first, mid, last cohort week (MM-DD)
+      let xlab = "";
+      const xIdx = n>2 ? [0, Math.floor(n/2), n-1] : cohorts.map((_,i)=>i);
+      xIdx.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-8)+'" fill="#666" font-size="9" text-anchor="middle">'+cohorts[i].week.slice(5)+'</text>'; });
+
+      // one polyline per bucket; break where value is null (immature)
+      let lines = "";
+      CHURN_BUCKETS.forEach(b => {
+        let d = "", pendingMove = true;
+        cohorts.forEach((c,i) => {
+          const v = c[b.key];
+          if (v == null) { pendingMove = true; return; }
+          d += (pendingMove ? "M" : "L") + x(i).toFixed(1) + " " + y(v).toFixed(1) + " ";
+          pendingMove = false;
+        });
+        if (d) lines += '<path d="'+d+'" fill="none" stroke="'+b.color+'" stroke-width="2" stroke-linejoin="round"/>';
+        // endpoint dot on the last non-null
+        for (let i=n-1;i>=0;i--){ if(c_at(cohorts,i,b.key)!=null){ lines += '<circle cx="'+x(i).toFixed(1)+'" cy="'+y(cohorts[i][b.key]).toFixed(1)+'" r="2.5" fill="'+b.color+'"/>'; break; } }
+      });
+      return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+grid+xlab+lines+'</svg>';
+    }
+    function c_at(cohorts,i,key){ return cohorts[i] ? cohorts[i][key] : null; }
+
+    function renderChurn() {
+      const container = document.getElementById("container");
+      const appBtns = CHURN_APPS.map(([id,name]) =>
+        '<button class="pf-range-btn '+(id===churnApp?"active":"")+'" onclick="setChurnApp(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      const header =
+        '<div class="pf-head"><div><div class="pf-m-label">Cancellation cohorts · weekly</div>' +
+          '<div class="ch-sub">Gross cancellations as % of each week’s new subscriptions, split by how long after starting they cancelled. Immature buckets are hidden for young cohorts.</div></div>' +
+          '<div class="pf-ranges ch-apps">'+appBtns+'</div>' +
+        '</div>';
+
+      const d = churnData[churnApp];
+      if (!d && churnLoading) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
+      if (churnError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load churn</h2><p>'+churnError+'</p></div>'; return; }
+      if (!d) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
+      const cohorts = (d.cohorts||[]).filter(c => c.size > 0);
+      if (!cohorts.length) { container.innerHTML = header + '<div class="empty-state"><h2>No cohorts</h2><p>No subscriptions in the window.</p></div>'; return; }
+
+      const legend = '<div class="ch-legend">' + CHURN_BUCKETS.map(b =>
+        '<span class="ch-lg"><i style="background:'+b.color+'"></i>'+b.label+'</span>').join("") + '</div>';
+      const chart = buildChurnChart(cohorts, 900, 300);
+
+      // cohort table below (size + total cancel %)
+      const rows = cohorts.slice().reverse().map(c => {
+        const known = CHURN_BUCKETS.map(b=>c[b.key]).filter(v=>v!=null);
+        const total = known.reduce((s,v)=>s+v,0);
+        const cells = CHURN_BUCKETS.map(b => '<td class="pf-t-num r '+(c[b.key]==null?"dim":"")+'">'+(c[b.key]==null?"—":c[b.key].toFixed(1)+"%")+'</td>').join("");
+        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+c.size+'</td>'+cells+'<td class="pf-t-num r">'+total.toFixed(1)+'%</td></tr>';
+      }).join("");
+      const table = '<div class="pf-apps"><h3>By cohort week</h3><table class="pf-table"><thead><tr>' +
+        '<th>Cohort</th><th class="r">Subs</th>' + CHURN_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total*</th>' +
+        '</tr></thead><tbody>'+rows+'</tbody></table>' +
+        '<div class="ch-foot">*Total sums only matured buckets — recent cohorts understate until they age. Cohort = subscription start week; cancellations counted gross (auto-renew turned off).</div></div>';
+
+      container.innerHTML = header + legend + '<div class="pf-chart-wrap">'+chart+'</div>' + table;
     }
 
     window.copyTxId = function(fullId, el, ev) {

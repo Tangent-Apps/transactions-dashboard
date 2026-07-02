@@ -732,3 +732,120 @@ functions.http("userLifetime", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ---- Cancellation cohorts ----
+// Weekly cohorts by subscription start (initial_purchase.purchasedAt), per app.
+// Cancels (gross 'cancellation' events, first per otid) bucketed by age from start:
+// D0 / D1 / D2-3 / D4-7 / D8+. Each bucket = % of the cohort. Denominator = subs
+// started that week. Immature buckets are nulled per cohort (see maturity gates)
+// so young cohorts don't read artificially low.
+const churnCache = new Map(); // key = appId, value = { ts, data }
+const CHURN_CACHE_TTL_MS = 30 * 60 * 1000;
+const CHURN_WEEKS = 14; // how many weekly cohorts to return
+
+// Bucket needs this many days elapsed since cohort start to be "complete".
+// D8+ keeps accruing forever; treat 15d as settled enough to show.
+const BUCKET_MATURITY_DAYS = { d0: 1, d1: 2, d3: 4, d7: 8, d7plus: 15 };
+
+async function fetchChurnCohorts(appId) {
+  const appFilter = "applicationId = " + Number(appId);
+  const sql = `
+WITH subs AS (
+  SELECT originalTransactionId AS otid, min(toDate(purchasedAt)) AS start_day
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE ${appFilter} AND isSandbox=0 AND name='initial_purchase' AND originalTransactionId!=''
+  GROUP BY otid
+),
+cancels AS (
+  SELECT originalTransactionId AS otid, min(toDate(ts)) AS cancel_day
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE ${appFilter} AND isSandbox=0 AND name='cancellation' AND originalTransactionId!=''
+  GROUP BY otid
+)
+SELECT
+  toString(toStartOfWeek(s.start_day, 1)) AS cohort_week,
+  count() AS cohort_size,
+  countIf(dateDiff('day',s.start_day,c.cancel_day)=0) AS d0,
+  countIf(dateDiff('day',s.start_day,c.cancel_day)=1) AS d1,
+  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 2 AND 3) AS d3,
+  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 4 AND 7) AS d7,
+  countIf(dateDiff('day',s.start_day,c.cancel_day) >= 8) AS d7plus
+FROM subs s
+LEFT JOIN cancels c ON s.otid = c.otid
+WHERE s.start_day >= today() - ${CHURN_WEEKS * 7}
+GROUP BY cohort_week ORDER BY cohort_week ASC
+FORMAT JSONEachRow`.trim();
+
+  const rows = await swQuery(sql);
+  const todayMs = Date.now();
+  const cohorts = rows.map((r) => {
+    const size = Number(r.cohort_size) || 0;
+    const startMs = Date.parse(r.cohort_week + "T00:00:00Z");
+    const ageDays = Math.floor((todayMs - startMs) / 86400000);
+    const pct = (n) => (size > 0 ? Math.round((Number(n) / size) * 1000) / 10 : 0);
+    // null a bucket if the cohort hasn't aged past the bucket's window end
+    const gated = (val, key) => (ageDays >= BUCKET_MATURITY_DAYS[key] ? pct(val) : null);
+    return {
+      week: r.cohort_week,
+      size,
+      ageDays,
+      d0: gated(r.d0, "d0"),
+      d1: gated(r.d1, "d1"),
+      d3: gated(r.d3, "d3"),
+      d7: gated(r.d7, "d7"),
+      d7plus: gated(r.d7plus, "d7plus"),
+    };
+  });
+  return { appId: Number(appId), cohorts, generatedAt: new Date().toISOString() };
+}
+
+functions.http("churnCohorts", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://localhost:8899",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
+    const idToken = authHeader.slice(7);
+    let decoded;
+    try {
+      decoded = await admin.auth().verifyIdToken(idToken);
+    } catch (e) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    if (decoded.dashboard !== true) return res.status(403).json({ error: "Forbidden" });
+
+    const appIdRaw = req.query.appId;
+    if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) {
+      return res.status(400).json({ error: "appId required" });
+    }
+    const appId = Number(appIdRaw);
+    const now = Date.now();
+    const hit = churnCache.get(appId);
+    if (hit && (now - hit.ts) < CHURN_CACHE_TTL_MS) {
+      res.set("X-Cache", "HIT");
+      return res.status(200).json(hit.data);
+    }
+    const data = await fetchChurnCohorts(appId);
+    churnCache.set(appId, { ts: now, data });
+    res.set("X-Cache", "MISS");
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("churnCohorts error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
