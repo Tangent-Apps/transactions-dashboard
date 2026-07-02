@@ -438,10 +438,18 @@
       return "$" + v.toLocaleString("en-US");
     }
 
+    // "2026-06-01" → "1 Jun" (shared by Revenue + Churn x-axis labels)
+    const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    function fmtDayMon(dateStr) {
+      const p = String(dateStr).slice(0,10).split("-");
+      if (p.length < 3) return dateStr;
+      return String(Number(p[2])) + " " + (MON[Number(p[1]) - 1] || "");
+    }
+
     function buildMrrChart(pts, w, h) {
       // pts: [{date, mrr, arr}] ascending. Two lines: MRR (gold, left axis) + ARR (indigo, right axis).
       // ARR = 12*MRR so it shares the MRR shape; independent scaling keeps both readable.
-      const padL = 8, padR = 8, padT = 12, padB = 22;
+      const padL = 8, padR = 8, padT = 12, padB = 26;
       const iw = w - padL - padR, ih = h - padT - padB;
       const mvals = pts.map(p => p.mrr);
       const mMin = Math.min(...mvals), mMax = Math.max(...mvals);
@@ -469,6 +477,11 @@
         grid += '<text x="'+padL+'" y="'+(gy-3)+'" fill="#7a6a3a" font-size="9" text-anchor="start">'+fmtMoney(mv)+'</text>';
         grid += '<text x="'+(w-padR)+'" y="'+(gy-3)+'" fill="#5a6a8a" font-size="9" text-anchor="end">'+fmtMoney(mv*12)+'</text>';
       }
+      // x labels: first, mid, last (shared "1 Jun" format with Churn)
+      let xlab = "";
+      const xIdx = pts.length>2 ? [0, Math.floor(pts.length/2), pts.length-1] : pts.map((_,i)=>i);
+      xIdx.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-7)+'" fill="#666" font-size="9" text-anchor="middle">'+fmtDayMon(pts[i].date)+'</text>'; });
+
       // hover targets carry both mrr + arr
       let dots = "";
       pts.forEach((p,i) => {
@@ -476,7 +489,7 @@
         dots += '<rect class="pf-hit" data-i="'+i+'" data-x="'+x(i).toFixed(1)+'" data-y="'+yM(p.mrr).toFixed(1)+'" data-mrr="'+p.mrr+'" data-arr="'+p.arr+'" data-date="'+p.date+'" x="'+(x(i)-(iw/pts.length/2)).toFixed(1)+'" y="'+padT+'" width="'+(iw/pts.length).toFixed(1)+'" height="'+ih+'" fill="transparent"/>';
       });
       return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">' +
-        grid +
+        grid + xlab +
         '<defs><linearGradient id="pfg" x1="0" y1="0" x2="0" y2="1">' +
           '<stop offset="0%" stop-color="#fbbf24" stop-opacity="0.24"/>' +
           '<stop offset="100%" stop-color="#fbbf24" stop-opacity="0"/>' +
@@ -619,7 +632,7 @@
           const py = (Number(hit.dataset.y)/vb.height)*rect.height;
           tip.style.left = px + "px";
           tip.style.top = py + "px";
-          tip.innerHTML = '<div class="t-date">'+hit.dataset.date+'</div><div class="t-mrr">'+fmtMoney(mrr)+' MRR</div><div class="t-arr">'+fmtMoney(arr)+' ARR</div>';
+          tip.innerHTML = '<div class="t-date">'+fmtDayMon(hit.dataset.date)+'</div><div class="t-mrr">'+fmtMoney(mrr)+' MRR</div><div class="t-arr">'+fmtMoney(arr)+' ARR</div>';
           tip.style.opacity = "1";
         });
         hit.addEventListener("mouseleave", () => {
@@ -692,10 +705,10 @@
         grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="#1f1f1f" stroke-width="1"/>';
         grid += '<text x="'+(padL-6)+'" y="'+(Number(gy)+3)+'" fill="#555" font-size="9" text-anchor="end">'+gv.toFixed(0)+'%</text>';
       }
-      // x labels: first, mid, last cohort week (MM-DD)
+      // x labels: first, mid, last cohort week (shared "1 Jun" format with Revenue)
       let xlab = "";
       const xIdx = n>2 ? [0, Math.floor(n/2), n-1] : cohorts.map((_,i)=>i);
-      xIdx.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-8)+'" fill="#666" font-size="9" text-anchor="middle">'+cohorts[i].week.slice(5)+'</text>'; });
+      xIdx.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-7)+'" fill="#666" font-size="9" text-anchor="middle">'+fmtDayMon(cohorts[i].week)+'</text>'; });
 
       // one polyline per bucket; break where value is null (immature)
       let lines = "";
@@ -783,7 +796,7 @@
           const c = cohorts[i];
           const vb = svg.viewBox.baseVal, rect = svg.getBoundingClientRect();
           const px = (Number(hit.dataset.x)/vb.width)*rect.width;
-          let html = '<div class="t-date">'+c.week+' · '+c.size+' subs</div>';
+          let html = '<div class="t-date">'+fmtDayMon(c.week)+' · '+c.size+' subs</div>';
           CHURN_BUCKETS.forEach(b => {
             const v = c[b.key];
             html += '<div class="t-row"><span class="t-sw" style="background:'+b.color+'"></span>'+b.label+
