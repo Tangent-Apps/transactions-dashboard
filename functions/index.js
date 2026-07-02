@@ -742,16 +742,16 @@ functions.http("userLifetime", async (req, res) => {
 // ---- Cancellation cohorts ----
 // Weekly cohorts by subscription start (initial_purchase.purchasedAt), per app.
 // Cancels (gross 'cancellation' events, first per otid) bucketed by age from start:
-// D0 / D1 / D2+. Each bucket = % of the cohort. Denominator = subs started that
-// week. Immature buckets are nulled per cohort (see maturity gates) so young
-// cohorts don't read artificially low.
+// D0 / D1-7 / D8-30 / D30+. Each bucket = % of the cohort. Denominator = subs
+// started that week. Immature buckets are nulled per cohort (see maturity gates)
+// so young cohorts don't read artificially low.
 const churnCache = new Map(); // key = appId, value = { ts, data }
 const CHURN_CACHE_TTL_MS = 30 * 60 * 1000;
-const CHURN_WEEKS = 14; // how many weekly cohorts to return
+const CHURN_WEEKS = 14; // how many weekly cohorts to return (client windows further)
 
 // Bucket needs this many days elapsed since cohort start to be "complete".
-// D2+ keeps accruing forever; treat 15d as settled enough to show.
-const BUCKET_MATURITY_DAYS = { d0: 1, d1: 2, d2plus: 15 };
+// D30+ keeps accruing forever; treat 45d as settled enough to show.
+const BUCKET_MATURITY_DAYS = { d0: 1, d1_7: 8, d8_30: 31, d30plus: 45 };
 
 async function fetchChurnCohorts(appId) {
   const appFilter = "applicationId = " + Number(appId);
@@ -772,8 +772,9 @@ SELECT
   toString(toStartOfWeek(s.start_day, 1)) AS cohort_week,
   count() AS cohort_size,
   countIf(dateDiff('day',s.start_day,c.cancel_day)=0) AS d0,
-  countIf(dateDiff('day',s.start_day,c.cancel_day)=1) AS d1,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) >= 2) AS d2plus
+  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 1 AND 7) AS d1_7,
+  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 8 AND 30) AS d8_30,
+  countIf(dateDiff('day',s.start_day,c.cancel_day) > 30) AS d30plus
 FROM subs s
 LEFT JOIN cancels c ON s.otid = c.otid
 WHERE s.start_day >= today() - ${CHURN_WEEKS * 7}
@@ -794,8 +795,9 @@ FORMAT JSONEachRow`.trim();
       size,
       ageDays,
       d0: gated(r.d0, "d0"),
-      d1: gated(r.d1, "d1"),
-      d2plus: gated(r.d2plus, "d2plus"),
+      d1_7: gated(r.d1_7, "d1_7"),
+      d8_30: gated(r.d8_30, "d8_30"),
+      d30plus: gated(r.d30plus, "d30plus"),
     };
   });
   return { appId: Number(appId), cohorts, generatedAt: new Date().toISOString() };

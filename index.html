@@ -173,6 +173,13 @@
     .ch-legend .ch-lg { display: flex; align-items: center; gap: 6px; }
     .ch-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
     .ch-foot { font-size: 11px; color: #666; margin-top: 12px; line-height: 1.5; }
+    .ch-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
+    #chTip { transform: translateX(-50%); min-width: 150px; text-align: left; white-space: normal; }
+    #chTip.flip-left { transform: translateX(-100%); }
+    #chTip.flip-right { transform: translateX(0); }
+    .pf-tip .t-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; margin-top: 3px; }
+    .pf-tip .t-sw { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+    .pf-tip .t-val { margin-left: auto; padding-left: 14px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
 
     .show-more { display: block; width: 100%; padding: 12px; margin: 16px 0; background: #1a1a1a; border: 1px solid #232323; border-radius: 10px; color: #aaa; font-size: 13px; cursor: pointer; }
     .show-more:hover { background: #222; color: #fff; }
@@ -631,12 +638,16 @@
       ["32830","GirlWalk"],["22372","GirlTalk"],["28209","Christian Daily Tasks"],
       ["35269","Poly AI"],["29053","Christian Music AI"],["23954","Spicy Stories"],
     ];
-    // Bucket definitions: key, label, color, order back-to-front.
+    // Bucket definitions: key, label, color.
     const CHURN_BUCKETS = [
-      { key:"d0",     label:"Day 0",   color:"#f87171" },
-      { key:"d1",     label:"Day 1",   color:"#fbbf24" },
-      { key:"d2plus", label:"Day 2+",  color:"#4ade80" },
+      { key:"d0",      label:"Day 0",     color:"#f87171" },
+      { key:"d1_7",    label:"Days 1–7",  color:"#fb923c" },
+      { key:"d8_30",   label:"Days 8–30", color:"#fbbf24" },
+      { key:"d30plus", label:"Day 30+",   color:"#4ade80" },
     ];
+    const CHURN_WINDOWS = [30, 60, 90, 0]; // 0 = All
+    let churnWindow = 60;                  // default weeks shown ≈ 60 days
+    window.setChurnWindow = function(w) { churnWindow = w; renderChurn(); };
     let churnApp = "32830";
     let churnData = {};      // appId → { cohorts, generatedAt }
     let churnInflight = {};   // appId → true while its fetch is running
@@ -697,10 +708,23 @@
           pendingMove = false;
         });
         if (d) lines += '<path d="'+d+'" fill="none" stroke="'+b.color+'" stroke-width="2" stroke-linejoin="round"/>';
-        // endpoint dot on the last non-null
         for (let i=n-1;i>=0;i--){ if(c_at(cohorts,i,b.key)!=null){ lines += '<circle cx="'+x(i).toFixed(1)+'" cy="'+y(cohorts[i][b.key]).toFixed(1)+'" r="2.5" fill="'+b.color+'"/>'; break; } }
       });
-      return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+grid+xlab+lines+'</svg>';
+      // per-cohort hover: dots on every bucket + a vertical guide + a hit rect
+      let hover = "";
+      cohorts.forEach((c,i) => {
+        const cx = x(i).toFixed(1);
+        let dots = '<line class="ch-guide" x1="'+cx+'" y1="'+padT+'" x2="'+cx+'" y2="'+(padT+ih)+'" stroke="#3a3a3a" stroke-width="1" opacity="0"/>';
+        CHURN_BUCKETS.forEach(b => {
+          const v = c[b.key];
+          if (v == null) return;
+          dots += '<circle class="ch-hd" cx="'+cx+'" cy="'+y(v).toFixed(1)+'" r="3.5" fill="'+b.color+'" opacity="0"/>';
+        });
+        hover += '<g class="ch-hg" data-i="'+i+'">'+dots+'</g>';
+        const bw = iw/Math.max(n,1);
+        hover += '<rect class="ch-hit" data-i="'+i+'" data-x="'+cx+'" x="'+(x(i)-bw/2).toFixed(1)+'" y="'+padT+'" width="'+bw.toFixed(1)+'" height="'+ih+'" fill="transparent"/>';
+      });
+      return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+grid+xlab+lines+hover+'</svg>';
     }
     function c_at(cohorts,i,key){ return cohorts[i] ? cohorts[i][key] : null; }
 
@@ -709,24 +733,31 @@
       const appBtns = CHURN_APPS.map(([id,name]) =>
         '<button class="pf-range-btn '+(id===churnApp?"active":"")+'" onclick="setChurnApp(\''+id+'\')">'+name+'</button>'
       ).join("");
+      const winBtns = CHURN_WINDOWS.map(w =>
+        '<button class="pf-range-btn '+(w===churnWindow?"active":"")+'" onclick="setChurnWindow('+w+')">'+(w===0?"All":w+"D")+'</button>'
+      ).join("");
       const header =
         '<div class="pf-head"><div><div class="pf-m-label">Cancellation cohorts · weekly</div>' +
-          '<div class="ch-sub">Gross cancellations as % of each week’s new subscriptions, split by how long after starting they cancelled. Immature buckets are hidden for young cohorts.</div></div>' +
-          '<div class="pf-ranges ch-apps">'+appBtns+'</div>' +
+          '<div class="ch-sub">Each point is a weekly cohort, plotted on the week its subscriptions started. Lines show what % of that cohort cancelled on day 0, within days 1–7, 8–30, or after 30 days. Hover a week for exact numbers. Recent cohorts hide buckets they’re too young to have filled.</div></div>' +
+          '<div class="ch-controls"><div class="pf-ranges ch-apps">'+appBtns+'</div><div class="pf-ranges">'+winBtns+'</div></div>' +
         '</div>';
 
       const d = churnData[churnApp];
       if (!d && churnInflight[churnApp]) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
       if (churnError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load churn</h2><p>'+churnError+'</p></div>'; return; }
       if (!d) { container.innerHTML = header + '<div class="loading">Loading cohorts…</div>'; return; }
-      const cohorts = (d.cohorts||[]).filter(c => c.size > 0);
-      if (!cohorts.length) { container.innerHTML = header + '<div class="empty-state"><h2>No cohorts</h2><p>No subscriptions in the window.</p></div>'; return; }
+      let cohorts = (d.cohorts||[]).filter(c => c.size > 0);
+      // window filter: keep cohorts whose start is within N days of today (0 = all)
+      if (churnWindow > 0) {
+        const cutoff = Date.now() - churnWindow*86400000;
+        cohorts = cohorts.filter(c => Date.parse(c.week + "T00:00:00Z") >= cutoff);
+      }
+      if (!cohorts.length) { container.innerHTML = header + '<div class="empty-state"><h2>No cohorts</h2><p>No subscriptions in this window.</p></div>'; return; }
 
       const legend = '<div class="ch-legend">' + CHURN_BUCKETS.map(b =>
         '<span class="ch-lg"><i style="background:'+b.color+'"></i>'+b.label+'</span>').join("") + '</div>';
       const chart = buildChurnChart(cohorts, 900, 300);
 
-      // cohort table below (size + total cancel %)
       const rows = cohorts.slice().reverse().map(c => {
         const known = CHURN_BUCKETS.map(b=>c[b.key]).filter(v=>v!=null);
         const total = known.reduce((s,v)=>s+v,0);
@@ -738,7 +769,41 @@
         '</tr></thead><tbody>'+rows+'</tbody></table>' +
         '<div class="ch-foot">*Total sums only matured buckets — recent cohorts understate until they age. Cohort = subscription start week; cancellations counted gross (auto-renew turned off).</div></div>';
 
-      container.innerHTML = header + legend + '<div class="pf-chart-wrap">'+chart+'</div>' + table;
+      container.innerHTML = header + legend + '<div class="pf-chart-wrap" id="chChartWrap">'+chart+'<div class="pf-tip" id="chTip"></div></div>' + table;
+
+      // wire hover
+      const wrap = document.getElementById("chChartWrap");
+      const tip = document.getElementById("chTip");
+      const svg = wrap.querySelector("svg");
+      wrap.querySelectorAll(".ch-hit").forEach(hit => {
+        hit.addEventListener("mouseenter", () => {
+          const i = Number(hit.dataset.i);
+          const g = wrap.querySelector('.ch-hg[data-i="'+i+'"]');
+          if (g) { g.querySelectorAll(".ch-hd,.ch-guide").forEach(el => el.setAttribute("opacity","1")); }
+          const c = cohorts[i];
+          const vb = svg.viewBox.baseVal, rect = svg.getBoundingClientRect();
+          const px = (Number(hit.dataset.x)/vb.width)*rect.width;
+          let html = '<div class="t-date">'+c.week+' · '+c.size+' subs</div>';
+          CHURN_BUCKETS.forEach(b => {
+            const v = c[b.key];
+            html += '<div class="t-row"><span class="t-sw" style="background:'+b.color+'"></span>'+b.label+
+              '<span class="t-val">'+(v==null?"—":v.toFixed(1)+"%")+'</span></div>';
+          });
+          tip.innerHTML = html;
+          tip.classList.remove("flip-left","flip-right");
+          if (px > rect.width - 90) tip.classList.add("flip-left");
+          else if (px < 90) tip.classList.add("flip-right");
+          tip.style.left = px + "px";
+          tip.style.top = "10px";
+          tip.style.opacity = "1";
+        });
+        hit.addEventListener("mouseleave", () => {
+          const i = Number(hit.dataset.i);
+          const g = wrap.querySelector('.ch-hg[data-i="'+i+'"]');
+          if (g) { g.querySelectorAll(".ch-hd,.ch-guide").forEach(el => el.setAttribute("opacity","0")); }
+          tip.style.opacity = "0";
+        });
+      });
     }
 
     window.copyTxId = function(fullId, el, ev) {
