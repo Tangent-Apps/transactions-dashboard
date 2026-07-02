@@ -887,12 +887,22 @@ async function fetchRefundCohorts(appId, plan) {
   const sql = `
 WITH subs AS (
   SELECT originalTransactionId AS otid, min(toDate(purchasedAt)) AS start_day,
-    argMin(toFloat64(price), purchasedAt) AS start_price,
     if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS sub_plan
   FROM open_revenue.attributed_events_by_ts_rep
-  WHERE ${appFilter} AND isSandbox=0 AND name='initial_purchase' AND originalTransactionId!='' AND price IS NOT NULL
+  WHERE ${appFilter} AND isSandbox=0 AND name='initial_purchase' AND originalTransactionId!=''
   GROUP BY otid
   ${planHaving}
+),
+rev AS (
+  -- Gross revenue actually collected per subscription. NOT initial_purchase.price:
+  -- for trial subs that fires at $0 (trial start). Real money lands at renewal.
+  -- Sum all positive-price, non-refund charge events so the $-rate denominator is
+  -- true revenue taken in (else refund $ / $0 → nonsensical >100% rates).
+  SELECT originalTransactionId AS otid, sum(toFloat64(price)) AS gross
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE ${appFilter} AND isSandbox=0 AND isRefund=0 AND price>0
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND originalTransactionId!=''
+  GROUP BY otid
 ),
 refunds AS (
   SELECT originalTransactionId AS otid, min(toDate(ts)) AS refund_day,
@@ -904,7 +914,7 @@ refunds AS (
 SELECT
   toString(toStartOfWeek(s.start_day, 1)) AS cohort_week,
   count() AS cohort_size,
-  round(sum(s.start_price), 2) AS cohort_usd,
+  round(sum(rev.gross), 2) AS cohort_usd,
   countIf(dateDiff('day',s.start_day,r.refund_day)=0) AS d0_n,
   countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 1 AND 7) AS d1_7_n,
   countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 8 AND 30) AS d8_30_n,
@@ -914,6 +924,7 @@ SELECT
   round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) BETWEEN 8 AND 30), 2) AS d8_30_usd,
   round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) > 30), 2) AS d30plus_usd
 FROM subs s
+LEFT JOIN rev ON s.otid = rev.otid
 LEFT JOIN refunds r ON s.otid = r.otid
 WHERE s.start_day >= today() - ${REFUND_WEEKS * 7}
 GROUP BY cohort_week ORDER BY cohort_week ASC
