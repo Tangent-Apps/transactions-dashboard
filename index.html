@@ -167,13 +167,19 @@
     .pf-stale { font-size: 11px; color: #f5a07a; margin-bottom: 12px; }
 
     /* Churn view */
+    .ch-header { margin-bottom: 18px; }
+    .ch-title { margin-bottom: 14px; }
     .ch-sub { font-size: 12px; color: #888; margin-top: 5px; max-width: 62ch; line-height: 1.5; }
-    .ch-apps { flex-wrap: wrap; }
+    /* app selector = chips on their own row (matches toolbar app filter) */
+    .ch-appbar { display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid #1e1e1e; }
+    /* plan + range = labeled segmented controls */
+    .ch-filters { display: flex; gap: 22px; flex-wrap: wrap; align-items: center; }
+    .ch-ctl { display: flex; align-items: center; gap: 9px; }
+    .ch-ctl-label { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #666; }
     .ch-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; padding: 0 14px; font-size: 11px; color: #999; }
     .ch-legend .ch-lg { display: flex; align-items: center; gap: 6px; }
     .ch-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
     .ch-foot { font-size: 11px; color: #666; margin-top: 12px; line-height: 1.5; }
-    .ch-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
     #chTip { transform: translateX(-50%); min-width: 150px; text-align: left; white-space: normal; }
     #chTip.flip-left { transform: translateX(-100%); }
     #chTip.flip-right { transform: translateX(0); }
@@ -746,19 +752,26 @@
 
     function renderChurn() {
       const container = document.getElementById("container");
+      // App = primary selector → chips (matches the toolbar app filter idiom)
       const appBtns = CHURN_APPS.map(([id,name]) =>
-        '<button class="pf-range-btn '+(id===churnApp?"active":"")+'" onclick="setChurnApp(\''+id+'\')">'+name+'</button>'
+        '<button class="filter-btn '+(id===churnApp?"active":"")+'" onclick="setChurnApp(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      // Plan + Range = filters → labeled segmented controls
+      const planBtns = CHURN_PLANS.map(([id,name]) =>
+        '<button class="pf-range-btn '+(id===churnPlan?"active":"")+'" onclick="setChurnPlan(\''+id+'\')">'+name+'</button>'
       ).join("");
       const winBtns = CHURN_WINDOWS.map(w =>
         '<button class="pf-range-btn '+(w===churnWindow?"active":"")+'" onclick="setChurnWindow('+w+')">'+(w===0?"All":w+"D")+'</button>'
       ).join("");
-      const planBtns = CHURN_PLANS.map(([id,name]) =>
-        '<button class="pf-range-btn '+(id===churnPlan?"active":"")+'" onclick="setChurnPlan(\''+id+'\')">'+name+'</button>'
-      ).join("");
       const header =
-        '<div class="pf-head"><div><div class="pf-m-label">Cancellation cohorts · weekly</div>' +
-          '<div class="ch-sub">Weekly cohorts by signup week. Each line = % who cancelled in that time window. Hover for details.</div></div>' +
-          '<div class="ch-controls"><div class="pf-ranges ch-apps">'+appBtns+'</div><div class="pf-ranges ch-plans">'+planBtns+'</div><div class="pf-ranges">'+winBtns+'</div></div>' +
+        '<div class="ch-header">' +
+          '<div class="ch-title"><div class="pf-m-label">Cancellation cohorts · weekly</div>' +
+            '<div class="ch-sub">Weekly cohorts by signup week. Each line = % who cancelled in that time window. Hover for details.</div></div>' +
+          '<div class="ch-appbar">'+appBtns+'</div>' +
+          '<div class="ch-filters">' +
+            '<div class="ch-ctl"><span class="ch-ctl-label">Plan</span><div class="pf-ranges">'+planBtns+'</div></div>' +
+            '<div class="ch-ctl"><span class="ch-ctl-label">Range</span><div class="pf-ranges">'+winBtns+'</div></div>' +
+          '</div>' +
         '</div>';
 
       const d = churnData[churnKey()];
