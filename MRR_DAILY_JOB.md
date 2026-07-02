@@ -13,9 +13,12 @@ Runs only while the Claude Code desktop app is open. If it's closed when due, it
 next launch. Manage it from the **Scheduled** section in the sidebar.
 
 ## What it does each run
-1. Pulls Superwall's own MRR timeseries (last 7 days) for every app via the Superwall MCP.
-2. Sums per-day across all apps → portfolio MRR. ARR = MRR × 12.
-3. Upserts `mrr_snapshots/{YYYY-MM-DD}` for the last 7 days (recent days re-pulled every
+1. **Discovers apps dynamically** via `list_projects` (org 9618) — keeps every app where
+   `platform != web` and `archived_at` is null. New launches auto-included; no hardcoded
+   id list to maintain.
+2. Pulls Superwall's own MRR timeseries (last 7 days) for each app via the Superwall MCP.
+3. Sums per-day across all apps → portfolio MRR. ARR = MRR × 12.
+4. Upserts `mrr_snapshots/{YYYY-MM-DD}` for the last 7 days (recent days re-pulled every
    run because MRR is retroactive — refunds/renewals shift past days).
 
 ## Prerequisites (this machine)
