@@ -1032,3 +1032,62 @@ functions.http("refundCohorts", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ---- Daily cohort sync (Cloud Scheduler → this function) ----
+// Precomputes churn + refund cohorts for every monitored app × plan and writes
+// them to Firestore (churn_cohorts/{appId}__{plan}, refund_cohorts/{appId}__{plan})
+// so the dashboard reads Firestore directly — no ClickHouse/function on page load.
+//
+// Runs server-side as the function's own service account: writes via the Admin SDK
+// (no OAuth token, no key file). Invocation is locked down at the IAM layer — only
+// the scheduler service account has run.invoker, so this is NOT allow-unauthenticated.
+// The payload is stored as a JSON string field `payload` (client JSON.parse()s it),
+// matching what scripts/sync-cohorts.sh wrote.
+const SYNC_APPS = [32830, 22372, 35269]; // GirlWalk, GirlTalk, Poly AI — must match dashboard CHURN_APPS/REFUND_APPS
+const SYNC_PLANS = ["all", "weekly", "annual"];
+
+async function runCohortSync() {
+  const nowIso = new Date().toISOString();
+  const results = { churn: 0, refund: 0, failed: [] };
+  for (const appId of SYNC_APPS) {
+    for (const plan of SYNC_PLANS) {
+      const planArg = plan === "all" ? null : plan;
+      // churn
+      try {
+        const data = await fetchChurnCohorts(appId, planArg);
+        await db.collection("churn_cohorts").doc(`${appId}__${plan}`).set({
+          payload: JSON.stringify(data),
+          generatedAt: nowIso,
+        });
+        results.churn++;
+      } catch (e) {
+        results.failed.push(`churn ${appId}/${plan}: ${e.message}`);
+      }
+      // refund
+      try {
+        const data = await fetchRefundCohorts(appId, planArg);
+        await db.collection("refund_cohorts").doc(`${appId}__${plan}`).set({
+          payload: JSON.stringify(data),
+          generatedAt: nowIso,
+        });
+        results.refund++;
+      } catch (e) {
+        results.failed.push(`refund ${appId}/${plan}: ${e.message}`);
+      }
+    }
+  }
+  return results;
+}
+
+functions.http("dailyCohortSync", async (req, res) => {
+  // Invocation is IAM-gated (scheduler SA has run.invoker); no app-level auth needed.
+  try {
+    const r = await runCohortSync();
+    console.log("cohort sync:", JSON.stringify(r));
+    const status = r.failed.length ? 207 : 200;
+    return res.status(status).json({ ok: r.failed.length === 0, ...r, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("dailyCohortSync error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
