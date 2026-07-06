@@ -1055,7 +1055,6 @@
     let roasRange = 90;
     let roasGran = "day";   // day | week | month
     let roasShowRefunds = true;
-    let roasDx = 30;        // chart: which milestone age to plot ROAS at
     let roasData = {};      // "appId__geo" → payload
     let roasInflight = {};  // "appId__geo" → true while loading
     let roasError = null;
@@ -1065,7 +1064,6 @@
     window.setRoasRange = function(w) { roasRange = w; renderRoas(); };
     window.setRoasGran = function(g) { roasGran = g; renderRoas(); };
     window.toggleRoasRefunds = function() { roasShowRefunds = !roasShowRefunds; renderRoas(); };
-    window.setRoasDx = function(m) { roasDx = m; renderRoas(); };
 
     async function loadRoas() {
       const key = roasKey();
@@ -1153,66 +1151,61 @@
       return out;
     }
 
-    // SVG chart: each cohort bucket's ROAS % at age `dx` vs a 100% break-even line.
-    // buckets = roasAggregate output (newest-first); we plot oldest→newest L→R.
-    // Matured buckets (minAge >= dx) = solid dot colored by ≥/<100%; pending
-    // (younger than dx) = hollow gray dot at partial ROAS. Line connects matured.
-    function buildRoasChart(buckets, dx, w, h) {
+    // SVG chart: one line per Dx maturity (D0/D7/D14/D30) across cohort buckets,
+    // vs a 100% break-even line. Each series plots only buckets matured to that Dx
+    // (b.dx(m) non-null); younger buckets are simply absent from that line. Later
+    // milestones sit higher (more renewals collected).
+    const ROAS_CHART_SERIES = [
+      { m: 0,  color: "#f0997b", label: "D0" },
+      { m: 7,  color: "#ef9f27", label: "D7" },
+      { m: 14, color: "#5dcaa5", label: "D14" },
+      { m: 30, color: "#5b8def", label: "D30" },
+    ];
+    function buildRoasChart(buckets, w, h) {
       const data = buckets.slice().reverse(); // oldest → newest
       const n = data.length;
       if (!n) return '<div class="empty-state"><h2>No cohorts</h2><p>No spend in this window.</p></div>';
       const padL = 40, padR = 14, padT = 14, padB = 34;
       const iw = w - padL - padR, ih = h - padT - padB;
-      // value per bucket at dx (may be null=pending); partial ROAS for pending dots
-      const val = (b) => b.dx(dx);
-      const partial = (b) => (b.hasSpend && b.spend>0) ? (b.p[dx]/b.spend)*100 : null;
-      let maxV = 100;
-      data.forEach(b => { const v = val(b) ?? partial(b); if (v!=null && v>maxV) maxV = v; });
-      maxV = Math.ceil((maxV*1.1)/20)*20; // headroom, round to 20
-      const x = (i) => padL + (n===1 ? iw/2 : (i/(n-1))*iw);
-      const y = (v) => padT + ih - (v/maxV)*ih;
 
-      // y gridlines + labels every 20%
+      let maxV = 100;
+      data.forEach(b => ROAS_CHART_SERIES.forEach(s => { const v=b.dx(s.m); if (v!=null && v>maxV) maxV=v; }));
+      maxV = Math.ceil((maxV*1.1)/20)*20;
+      const x = (i) => padL + (n===1 ? iw/2 : (i/(n-1))*iw);
+      const y = (v) => padT + ih - (Math.min(v,maxV)/maxV)*ih;
+
+      // y gridlines + labels every 20%; 100% emphasized
       let grid = "";
       for (let g=0; g<=maxV; g+=20) {
-        const gy = y(g).toFixed(1);
         const is100 = g===100;
-        grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="'+(is100?"#8a8a8a":"#1f1f1f")+'" stroke-width="'+(is100?1.5:1)+'"'+(is100?' stroke-dasharray="5 4"':'')+'/>';
+        grid += '<line x1="'+padL+'" y1="'+y(g).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y(g).toFixed(1)+'" stroke="'+(is100?"#8a8a8a":"#1f1f1f")+'" stroke-width="'+(is100?1.5:1)+'"'+(is100?' stroke-dasharray="5 4"':'')+'/>';
         grid += '<text x="'+(padL-6)+'" y="'+(y(g)+3).toFixed(1)+'" fill="#777" font-size="9" text-anchor="end">'+g+'%</text>';
       }
-      // 100% label chip on the break-even line
       grid += '<text x="'+(w-padR)+'" y="'+(y(100)-4).toFixed(1)+'" fill="#8a8a8a" font-size="9" text-anchor="end">break-even</text>';
 
-      // line through matured points only
-      const matured = [];
-      data.forEach((b,i) => { const v=val(b); if (v!=null) matured.push([x(i), y(Math.min(v,maxV))]); });
-      let line = "";
-      if (matured.length>1) {
-        line = '<polyline fill="none" stroke="#5b8def" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="'+matured.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ")+'"/>';
-      }
-      // dots
-      let dots = "", hits = "";
-      data.forEach((b,i) => {
-        const v = val(b);
-        const px = x(i);
-        if (v==null) {
-          const pv = partial(b);
-          if (pv!=null) dots += '<circle cx="'+px.toFixed(1)+'" cy="'+y(Math.min(pv,maxV)).toFixed(1)+'" r="4" fill="#0f0f0f" stroke="#666" stroke-width="1.5"/>';
-        } else {
-          const col = v>=100 ? "#4ade80" : "#f87171";
-          dots += '<circle cx="'+px.toFixed(1)+'" cy="'+y(Math.min(v,maxV)).toFixed(1)+'" r="4.5" fill="'+col+'"/>';
-        }
-        // hover hit + tooltip data
-        const disp = v==null ? "pending" : Math.round(v)+"%";
-        hits += '<rect class="rc-hit" data-i="'+i+'" x="'+(px-iw/(2*Math.max(n,1))).toFixed(1)+'" y="'+padT+'" width="'+(iw/Math.max(n,1)).toFixed(1)+'" height="'+ih+'" fill="transparent"><title>'+b.label+' · D'+dx+' '+disp+'</title></rect>';
+      // one polyline + dots per series (matured points only)
+      let series = "";
+      ROAS_CHART_SERIES.forEach(s => {
+        const pts = [];
+        data.forEach((b,i) => { const v=b.dx(s.m); if (v!=null) pts.push([x(i), y(v)]); });
+        if (pts.length>1) series += '<polyline fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="'+pts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ")+'"/>';
+        pts.forEach(p => { series += '<circle cx="'+p[0].toFixed(1)+'" cy="'+p[1].toFixed(1)+'" r="3" fill="'+s.color+'"/>'; });
       });
 
-      // x labels: first, mid, last (avoid crowding)
+      // per-cohort hover: vertical guide + tooltip listing all series
+      let hits = "";
+      data.forEach((b,i) => {
+        const px = x(i);
+        const parts = ROAS_CHART_SERIES.map(s => { const v=b.dx(s.m); return s.label+" "+(v==null?"—":Math.round(v)+"%"); }).join("  ");
+        hits += '<rect class="rc-hit" x="'+(px-iw/(2*Math.max(n,1))).toFixed(1)+'" y="'+padT+'" width="'+(iw/Math.max(n,1)).toFixed(1)+'" height="'+ih+'" fill="transparent"><title>'+b.label+'\n'+parts+'</title></rect>';
+      });
+
+      // x labels: first, mid, last
       let xlab = "";
       const idxs = n>2 ? [0, Math.floor(n/2), n-1] : data.map((_,i)=>i);
       idxs.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-8)+'" fill="#777" font-size="9" text-anchor="middle">'+(data[i].label.replace("Week of ","")).slice(0,7)+'</text>'; });
 
-      return '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;display:block">'+grid+line+dots+hits+xlab+'</svg>';
+      return '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;display:block">'+grid+series+hits+xlab+'</svg>';
     }
 
     function renderRoas() {
@@ -1284,21 +1277,13 @@
         '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 100% profitable</span>' +
         '<span class="ch-lg"><i style="background:#333"></i>— not matured / no spend</span></div>';
 
-      // ---- Chart: ROAS at selected Dx vs 100% break-even ----
-      const dxBtns = ROAS_MILESTONES.map(m =>
-        '<button class="pf-range-btn '+(m===roasDx?"active":"")+'" onclick="setRoasDx('+m+')">D'+m+'</button>'
-      ).join("");
-      const chartSvg = buildRoasChart(buckets, roasDx, 900, 300);
+      // ---- Chart: ROAS maturity lines (D0/D7/D14/D30) vs 100% break-even ----
+      const chartSvg = buildRoasChart(buckets, 900, 300);
       const chartLegend = '<div class="ch-legend">' +
-        '<span class="ch-lg"><i style="background:#5b8def"></i>ROAS at D'+roasDx+'</span>' +
-        '<span class="ch-lg"><i style="background:#4ade80"></i>≥100%</span>' +
-        '<span class="ch-lg"><i style="background:#f87171"></i>&lt;100%</span>' +
-        '<span class="ch-lg"><i style="background:#0f0f0f;border:1.5px solid #666"></i>pending (not aged to D'+roasDx+')</span></div>';
+        ROAS_CHART_SERIES.map(s => '<span class="ch-lg"><i style="background:'+s.color+'"></i>'+s.label+'</span>').join("") +
+        '<span class="ch-lg"><i style="background:#0f0f0f;border-top:2px dashed #8a8a8a;height:0"></i>100% break-even</span></div>';
       const chart = '<div class="pf-apps" style="margin-bottom:14px">' +
-        '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px">' +
-          '<h3 style="margin:0">ROAS at day <span style="color:#5b8def">D'+roasDx+'</span> vs break-even</h3>' +
-          '<div class="pf-ranges">'+dxBtns+'</div>' +
-        '</div>' + chartLegend +
+        '<h3 style="margin:0 0 10px">ROAS maturity by cohort</h3>' + chartLegend +
         '<div class="pf-chart-wrap">'+chartSvg+'</div></div>';
 
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
