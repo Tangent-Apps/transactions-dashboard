@@ -1267,13 +1267,18 @@ WITH anchors AS (
   GROUP BY otid
 ),
 ev AS (
+  -- Paid charge events (positive proceeds) PLUS refunds. Refunds arrive under
+  -- name='cancellation' with isRefund=1 and already-negative proceeds, so they
+  -- fall outside the paid-name list — capture them via the isRefund=1 branch or
+  -- they'd be silently dropped and proceeds would be gross, not net. The many
+  -- isRefund=0 'cancellation' rows (auto-renew-off, proceeds=0) are excluded.
   SELECT a.cohort_day AS cohort_day, e.originalTransactionId AS otid,
     dateDiff('day', a.cohort_day, toDate(toTimeZone(e.ts, '${ROAS_TZ}'))) AS age,
     if(e.isRefund = 1, -abs(toFloat64(e.proceeds)), toFloat64(e.proceeds)) AS net
   FROM open_revenue.attributed_events_by_ts_rep e
   INNER JOIN anchors a ON e.originalTransactionId = a.otid
   WHERE e.applicationId = ${Number(appId)} AND e.isSandbox = 0
-    AND e.name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+    AND (e.name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') OR e.isRefund = 1)
 )
 SELECT toString(cohort_day) AS day,
   uniqExact(otid) AS buyers,
