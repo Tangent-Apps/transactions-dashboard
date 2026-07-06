@@ -1049,23 +1049,27 @@
     // Ratios are always from summed dollars, never averaged per-day ratios.
     const ROAS_APPS = [["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"]];
     const ROAS_RANGES = [30, 60, 90, 180, 0]; // 0 = All
+    const ROAS_GEOS = [["all","All"],["US","US"],["GB","UK"]];
     let roasApp = "32830";
+    let roasGeo = "all";
     let roasRange = 90;
     let roasGran = "day";   // day | week | month
-    let roasData = {};      // appId → payload
-    let roasInflight = {};  // appId → true while loading
+    let roasData = {};      // "appId__geo" → payload
+    let roasInflight = {};  // "appId__geo" → true while loading
     let roasError = null;
+    function roasKey() { return roasApp + "__" + roasGeo; }
     window.setRoasApp = function(id) { roasApp = id; renderRoas(); loadRoas(); };
+    window.setRoasGeo = function(g) { roasGeo = g; renderRoas(); loadRoas(); };
     window.setRoasRange = function(w) { roasRange = w; renderRoas(); };
     window.setRoasGran = function(g) { roasGran = g; renderRoas(); };
 
     async function loadRoas() {
-      const key = roasApp;
+      const key = roasKey();
       if (roasData[key] || roasInflight[key]) return;
       roasInflight[key] = true; roasError = null;
       try {
         const snap = await getDoc(doc(db, "roas_cohorts", key));
-        if (!snap.exists()) throw new Error("no data yet for this app");
+        if (!snap.exists()) throw new Error("no data yet for this app/geo");
         roasData[key] = JSON.parse(snap.data().payload);
       } catch (e) {
         console.warn("roas load failed", e);
@@ -1156,20 +1160,24 @@
       const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) =>
         '<button class="pf-range-btn '+(g===roasGran?"active":"")+'" onclick="setRoasGran(\''+g+'\')">'+name+'</button>'
       ).join("");
-      const d = roasData[roasApp];
+      const geoBtns = ROAS_GEOS.map(([g,name]) =>
+        '<button class="pf-range-btn '+(g===roasGeo?"active":"")+'" onclick="setRoasGeo(\''+g+'\')">'+name+'</button>'
+      ).join("");
+      const d = roasData[roasKey()];
       const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
       const header =
         '<div class="pf-head">' +
           '<div><div class="pf-m-label">ROAS · cohort-vaulted</div>' +
             (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>' +
           '<div class="ch-filters">' +
+            '<div class="pf-ranges">'+geoBtns+'</div>' +
             '<div class="pf-ranges">'+granBtns+'</div>' +
             '<div class="pf-ranges">'+ranBtns+'</div>' +
           '</div>' +
         '</div>' +
         '<div class="ch-appbar">'+appBtns+'</div>';
 
-      if (!d && roasInflight[roasApp]) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
+      if (!d && roasInflight[roasKey()]) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
       if (roasError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load ROAS</h2><p>'+roasError+'</p></div>'; return; }
       if (!d) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
 

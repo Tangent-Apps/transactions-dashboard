@@ -1085,15 +1085,17 @@ async function runCohortSync() {
     results.failed.push(`spend sync: ${e.message}`);
   }
   for (const appId of ROAS_APPS) {
-    try {
-      const data = await fetchRoasCohorts(appId);
-      await db.collection("roas_cohorts").doc(String(appId)).set({
-        payload: JSON.stringify(data),
-        generatedAt: nowIso,
-      });
-      results.roas++;
-    } catch (e) {
-      results.failed.push(`roas ${appId}: ${e.message}`);
+    for (const geo of ROAS_GEOS) {
+      try {
+        const data = await fetchRoasCohorts(appId, geo);
+        await db.collection("roas_cohorts").doc(`${appId}__${geo}`).set({
+          payload: JSON.stringify(data),
+          generatedAt: nowIso,
+        });
+        results.roas++;
+      } catch (e) {
+        results.failed.push(`roas ${appId}/${geo}: ${e.message}`);
+      }
     }
   }
   return results;
@@ -1157,14 +1159,30 @@ const ROAS_APP_NAMES = {
 // Apps to compute ROAS for. Must have both ad spend (Adjust) and revenue.
 const ROAS_APPS = [32830, 22372, 35269]; // GirlWalk, GirlTalk, Poly AI
 
+// Geo buckets: "all" (every country), plus per-ISO breakouts for the markets we
+// run paid UA in. US ~89% + UK ~11% of spend; the rest is negligible and only
+// shows under "all". Extend as new markets grow.
+const ROAS_GEOS = ["all", "US", "GB"];
+
+// Adjust reports country as a full name; revenue (ClickHouse countryCode) is ISO.
+// Map Adjust name → ISO for the breakout geos; null = not a tracked geo (folds
+// into "all" only).
+function adjustCountryToIso(name) {
+  const n = String(name || "").toLowerCase();
+  if (n === "united states") return "US";
+  if (n === "united kingdom") return "GB";
+  return null;
+}
+
 // Maturity gates: a spend-day's DN column is only meaningful once N full days
 // have elapsed since that day. Below the gate we return null (shown as "—").
 const ROAS_MILESTONES = [0, 7, 30, 90];
 const ROAS_WINDOW_DAYS = 180; // how many recent spend-days to compute (dashboard filters to 30/60/90/180)
 
 // ---- Adjust spend ingest ----
-// Pull per-app per-day cost from Adjust. datePeriod is an Adjust date_period
-// string, e.g. "-14d:today". Returns [{ appId, date, spend_usd }].
+// Pull per-app per-day per-country cost from Adjust. datePeriod is an Adjust
+// date_period string, e.g. "-14d:-0d". Returns [{ appId, date, iso, spend_usd }]
+// where iso is a tracked breakout geo ("US"/"GB") or null (folds into "all" only).
 async function fetchAdjustSpend(datePeriod) {
   const token = process.env.ADJUST_API_TOKEN;
   if (!token) throw new Error("Missing ADJUST_API_TOKEN");
@@ -1172,7 +1190,7 @@ async function fetchAdjustSpend(datePeriod) {
   // network_cost = actual ad-network spend (what the "Monthly Spend" report shows).
   // NOTE: the `cost` metric is attributed cost and returns almost nothing — do not use it.
   const params = new URLSearchParams({
-    dimensions: "app,day",
+    dimensions: "app,day,country",
     metrics: "network_cost",
     date_period: datePeriod,
   });
@@ -1192,35 +1210,46 @@ async function fetchAdjustSpend(datePeriod) {
     const date = String(row.day || row.date || "").slice(0, 10);
     if (!appId) { unmapped.add(String(row.app || "")); continue; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-    out.push({ appId, date, spend_usd: Math.round(Number(row.network_cost || 0) * 100) / 100 });
+    out.push({
+      appId, date,
+      iso: adjustCountryToIso(row.country),
+      spend_usd: Math.round(Number(row.network_cost || 0) * 100) / 100,
+    });
   }
   if (unmapped.size) console.warn("Adjust apps with no appId mapping (skipped):", [...unmapped].join(", "));
   return out;
 }
 
-// Pull spend and upsert ad_spend/{appId}__{date}. 14-day re-pull by default
-// (Adjust cost restates for a few days). Multiple Adjust apps mapping to one
-// appId+date are summed.
+// Pull spend and upsert ad_spend/{appId}__{geo}__{date} for geo in ROAS_GEOS.
+// "all" sums every country; "US"/"GB" are the country breakouts. 14-day re-pull
+// by default (Adjust cost restates for a few days).
 async function runAdjustSpendSync(datePeriod) {
   // Adjust relative format: "-14d:-0d" = 14 days ago through today ("today"/"0d"
   // are rejected by the API; the end must be expressed as "-0d").
   const period = datePeriod || "-14d:-0d";
   const rows = await fetchAdjustSpend(period);
 
-  const agg = new Map(); // `${appId}__${date}` -> spend_usd
+  // `${appId}__${geo}__${date}` -> spend_usd. Every row contributes to "all";
+  // rows whose country maps to a tracked ISO also contribute to that geo.
+  const agg = new Map();
+  const add = (appId, geo, date, spend) => {
+    const key = `${appId}__${geo}__${date}`;
+    agg.set(key, Math.round(((agg.get(key) || 0) + spend) * 100) / 100);
+  };
   for (const row of rows) {
-    const key = `${row.appId}__${row.date}`;
-    agg.set(key, Math.round(((agg.get(key) || 0) + row.spend_usd) * 100) / 100);
+    add(row.appId, "all", row.date, row.spend_usd);
+    if (row.iso) add(row.appId, row.iso, row.date, row.spend_usd);
   }
 
   let written = 0;
   let batch = db.batch();
   let inBatch = 0;
   for (const [key, spend] of agg.entries()) {
-    const [appIdStr, date] = key.split("__");
+    const [appIdStr, geo, date] = key.split("__");
     batch.set(db.collection("ad_spend").doc(key), {
       applicationId: Number(appIdStr),
       app_name: ROAS_APP_NAMES[Number(appIdStr)] || String(appIdStr),
+      geo,
       date,
       spend_usd: spend,
       source: "adjust",
@@ -1256,7 +1285,13 @@ functions.http("adjustSpendSync", async (req, res) => {
 // D0/D7/D30/D90 sums, plus lifetime-to-date. Joined against ad_spend to compute
 // ROAS per spend-day. Only paid charge events count (trial starts fire at $0 and
 // carry no proceeds, so they're naturally ~0 at D0 for trial-gated apps).
-async function fetchRoasCohorts(appId) {
+async function fetchRoasCohorts(appId, geo) {
+  // geo: "all" | "US" | "GB". For a breakout geo, restrict to cohorts whose buyer
+  // countryCode matches (anchored on the subscription's own country). Revenue AND
+  // spend are both filtered to the same geo so the ROAS ratio is apples-to-apples.
+  const g = ROAS_GEOS.includes(geo) ? geo : "all";
+  const geoRevFilter = g === "all" ? "" : `AND countryCode = '${g}'`;
+
   const sql = `
 WITH anchors AS (
   SELECT originalTransactionId AS otid,
@@ -1264,6 +1299,7 @@ WITH anchors AS (
   FROM open_revenue.attributed_events_by_ts_rep
   WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
     AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+    ${geoRevFilter}
   GROUP BY otid
 ),
 ev AS (
@@ -1297,9 +1333,10 @@ FORMAT JSONEachRow`.trim();
 
   const revRows = await swQuery(sql);
 
-  // Ad spend for the window, keyed by date.
+  // Ad spend for this app + geo, keyed by date.
   const spendSnap = await db.collection("ad_spend")
     .where("applicationId", "==", Number(appId))
+    .where("geo", "==", g)
     .get();
   const spendByDate = new Map();
   spendSnap.forEach((d) => {
@@ -1339,6 +1376,7 @@ FORMAT JSONEachRow`.trim();
   return {
     appId: Number(appId),
     appName: ROAS_APP_NAMES[Number(appId)] || String(appId),
+    geo: g,
     tz: ROAS_TZ,
     windowDays: ROAS_WINDOW_DAYS,
     rows,
@@ -1370,7 +1408,8 @@ functions.http("roasCohorts", async (req, res) => {
     if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
     const appIdRaw = req.query.appId;
     if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) return res.status(400).json({ error: "appId required" });
-    const data = await fetchRoasCohorts(Number(appIdRaw));
+    const geo = ROAS_GEOS.includes(String(req.query.geo)) ? String(req.query.geo) : "all";
+    const data = await fetchRoasCohorts(Number(appIdRaw), geo);
     return res.status(200).json(data);
   } catch (err) {
     console.error("roasCohorts error:", err.message);
