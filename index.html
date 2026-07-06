@@ -1118,9 +1118,10 @@
         const b = roasBucket(r.day, gran);
         let a = buckets.get(b.key);
         if (!a) { a = { key:b.key, label:b.label, spend:0, hasSpend:false, buyers:0,
-          p0:0, p7:0, p30:0, p90:0, pLife:0, minAge:Infinity }; buckets.set(b.key, a); }
+          p0:0, p7:0, p30:0, p90:0, pLife:0, refunds:0, minAge:Infinity }; buckets.set(b.key, a); }
         a.buyers += r.buyers;
         a.minAge = Math.min(a.minAge, r.ageDays);
+        a.refunds += (r.refunds || 0); // refunds tracked even for days with no spend
         if (r.spend != null) {
           a.spend += r.spend; a.hasSpend = true;
           a.p0 += r.p0; a.p7 += r.p7; a.p30 += r.p30; a.p90 += r.p90; a.pLife += r.proceeds;
@@ -1196,7 +1197,8 @@
       const bodyRows = buckets.map(b => {
         const spendCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>';
         const procCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.pLife)+'</td>';
-        return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+
+        const refCell = b.refunds > 0 ? '<td class="pf-t-num r" style="color:#f87171">-'+fmtMoney(b.refunds)+'</td>' : '<td class="pf-t-num r dim">—</td>';
+        return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+refCell+
           roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+'</tr>';
       }).join("");
 
@@ -1208,7 +1210,7 @@
 
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
       const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
-        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>' +
+        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th><th class="r">Refunds</th>' +
         '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th>' +
         '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
         '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until every day in the period has aged past that milestone, or the period has no ad spend.</div></div>';

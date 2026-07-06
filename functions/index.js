@@ -1274,6 +1274,7 @@ ev AS (
   -- isRefund=0 'cancellation' rows (auto-renew-off, proceeds=0) are excluded.
   SELECT a.cohort_day AS cohort_day, e.originalTransactionId AS otid,
     dateDiff('day', a.cohort_day, toDate(toTimeZone(e.ts, '${ROAS_TZ}'))) AS age,
+    e.isRefund AS isRef,
     if(e.isRefund = 1, -abs(toFloat64(e.proceeds)), toFloat64(e.proceeds)) AS net
   FROM open_revenue.attributed_events_by_ts_rep e
   INNER JOIN anchors a ON e.originalTransactionId = a.otid
@@ -1286,7 +1287,9 @@ SELECT toString(cohort_day) AS day,
   round(sumIf(net, age <= 7), 2) AS d7,
   round(sumIf(net, age <= 30), 2) AS d30,
   round(sumIf(net, age <= 90), 2) AS d90,
-  round(sum(net), 2) AS lifetime
+  round(sum(net), 2) AS lifetime,
+  -- total refunds ($, positive) charged back against this cohort, any age
+  round(sumIf(abs(net), isRef = 1), 2) AS refunds
 FROM ev
 WHERE cohort_day >= today() - ${ROAS_WINDOW_DAYS}
 GROUP BY cohort_day ORDER BY cohort_day DESC
@@ -1329,6 +1332,7 @@ FORMAT JSONEachRow`.trim();
       p30: Number(r.d30) || 0,
       p90: Number(r.d90) || 0,
       proceeds: Number(r.lifetime) || 0,
+      refunds: Number(r.refunds) || 0, // total refunds ($, positive) against this cohort
     };
   });
 
