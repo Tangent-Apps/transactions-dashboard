@@ -17,5 +17,13 @@ service cloud.firestore {
       allow read: if request.auth != null && request.auth.token.dashboard == true;
       allow write: if false;
     }
+    match /ad_spend/{doc} {
+      allow read: if request.auth != null && request.auth.token.dashboard == true;
+      allow write: if false;
+    }
+    match /roas_cohorts/{doc} {
+      allow read: if request.auth != null && request.auth.token.dashboard == true;
+      allow write: if false;
+    }
   }
 }

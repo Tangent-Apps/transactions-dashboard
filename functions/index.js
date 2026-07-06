@@ -1048,7 +1048,7 @@ const SYNC_PLANS = ["all", "weekly", "annual"];
 
 async function runCohortSync() {
   const nowIso = new Date().toISOString();
-  const results = { churn: 0, refund: 0, failed: [] };
+  const results = { churn: 0, refund: 0, spend: null, roas: 0, failed: [] };
   for (const appId of SYNC_APPS) {
     for (const plan of SYNC_PLANS) {
       const planArg = plan === "all" ? null : plan;
@@ -1076,6 +1076,26 @@ async function runCohortSync() {
       }
     }
   }
+
+  // ROAS: spend FIRST (Adjust), then the cohort rollup that divides by it
+  // (rule: a cron that depends on another's output runs after it, not before).
+  try {
+    results.spend = await runAdjustSpendSync();
+  } catch (e) {
+    results.failed.push(`spend sync: ${e.message}`);
+  }
+  for (const appId of ROAS_APPS) {
+    try {
+      const data = await fetchRoasCohorts(appId);
+      await db.collection("roas_cohorts").doc(String(appId)).set({
+        payload: JSON.stringify(data),
+        generatedAt: nowIso,
+      });
+      results.roas++;
+    } catch (e) {
+      results.failed.push(`roas ${appId}: ${e.message}`);
+    }
+  }
   return results;
 }
 
@@ -1088,6 +1108,273 @@ functions.http("dailyCohortSync", async (req, res) => {
     return res.status(status).json({ ok: r.failed.length === 0, ...r, generatedAt: new Date().toISOString() });
   } catch (err) {
     console.error("dailyCohortSync error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ===========================================================================
+// ROAS cohort tracker — spend (Adjust) ÷ cohort proceeds (Superwall ClickHouse)
+//
+// "Cohort-vaulted" ROAS: each spend-day's ROAS is spend that day ÷ ALL future
+// proceeds from the users first acquired that day. A renewal weeks later folds
+// back onto its cohort's spend-day, so old spend-days keep maturing over time.
+//
+// Two collections, both written only by Cloud Functions (rules: read for
+// dashboard claim, write false):
+//   ad_spend/{appId}__{YYYY-MM-DD}   — daily ad spend per app (from Adjust)
+//   roas_cohorts/{appId}             — precomputed maturity table (JSON payload)
+//
+// Everything keys on Superwall applicationId (number) so spend joins revenue.
+// Day boundaries use the account reporting tz (America/New_York) on BOTH sides
+// so spend-days and cohort-days line up. Numerator = proceeds (net of store cut).
+// ===========================================================================
+
+const ADJUST_REPORT_URL = "https://automate.adjust.com/reports-service/report";
+const ROAS_TZ = "America/New_York"; // account reporting tz — used for all day bucketing
+
+// Maps an Adjust "app" dimension value onto the Superwall applicationId used
+// everywhere else. Adjust labels don't match Superwall ids, so normalize here.
+// Unmapped apps return null and are skipped (logged) rather than mis-attributed.
+// NOTE: match on Adjust's actual app-name strings — verify against a live pull
+// (adjustSpendSync logs unmapped names) and adjust the keywords if they differ.
+function resolveAdjustAppId(adjustApp) {
+  const id = String(adjustApp || "").toLowerCase();
+  if (id.includes("girlwalk") || id.includes("girl walk") || id.includes("girl_walk")) return 32830; // GirlWalk
+  // GirlTalk ships under the Adjust app label "Solo Girlies" (matches resolveAppName's "girlies").
+  if (id.includes("girltalk") || id.includes("girl talk") || id.includes("girl_talk") || id.includes("girlies")) return 22372; // GirlTalk
+  if (id.includes("poly")) return 35269; // Poly AI
+  return null;
+}
+
+// Superwall applicationId → canonical app_name (mirror of the dashboard map).
+// Only the apps we run paid UA for need a spend mapping; extend as campaigns grow.
+const ROAS_APP_NAMES = {
+  32830: "GirlWalk",
+  22372: "GirlTalk",
+  35269: "Poly AI",
+};
+
+// Apps to compute ROAS for. Must have both ad spend (Adjust) and revenue.
+const ROAS_APPS = [32830, 22372, 35269]; // GirlWalk, GirlTalk, Poly AI
+
+// Maturity gates: a spend-day's DN column is only meaningful once N full days
+// have elapsed since that day. Below the gate we return null (shown as "—").
+const ROAS_MILESTONES = [0, 7, 30, 90];
+const ROAS_WINDOW_DAYS = 30; // how many recent spend-days to show
+
+// ---- Adjust spend ingest ----
+// Pull per-app per-day cost from Adjust. datePeriod is an Adjust date_period
+// string, e.g. "-14d:today". Returns [{ appId, date, spend_usd }].
+async function fetchAdjustSpend(datePeriod) {
+  const token = process.env.ADJUST_API_TOKEN;
+  if (!token) throw new Error("Missing ADJUST_API_TOKEN");
+
+  // network_cost = actual ad-network spend (what the "Monthly Spend" report shows).
+  // NOTE: the `cost` metric is attributed cost and returns almost nothing — do not use it.
+  const params = new URLSearchParams({
+    dimensions: "app,day",
+    metrics: "network_cost",
+    date_period: datePeriod,
+  });
+  const r = await fetch(`${ADJUST_REPORT_URL}?${params.toString()}`, {
+    headers: { Authorization: "Bearer " + token },
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`Adjust API ${r.status}: ${body.slice(0, 200)}`);
+  }
+  const json = await r.json();
+  const rows = Array.isArray(json.rows) ? json.rows : [];
+  const out = [];
+  const unmapped = new Set();
+  for (const row of rows) {
+    const appId = resolveAdjustAppId(row.app);
+    const date = String(row.day || row.date || "").slice(0, 10);
+    if (!appId) { unmapped.add(String(row.app || "")); continue; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    out.push({ appId, date, spend_usd: Math.round(Number(row.network_cost || 0) * 100) / 100 });
+  }
+  if (unmapped.size) console.warn("Adjust apps with no appId mapping (skipped):", [...unmapped].join(", "));
+  return out;
+}
+
+// Pull spend and upsert ad_spend/{appId}__{date}. 14-day re-pull by default
+// (Adjust cost restates for a few days). Multiple Adjust apps mapping to one
+// appId+date are summed.
+async function runAdjustSpendSync(datePeriod) {
+  // Adjust relative format: "-14d:-0d" = 14 days ago through today ("today"/"0d"
+  // are rejected by the API; the end must be expressed as "-0d").
+  const period = datePeriod || "-14d:-0d";
+  const rows = await fetchAdjustSpend(period);
+
+  const agg = new Map(); // `${appId}__${date}` -> spend_usd
+  for (const row of rows) {
+    const key = `${row.appId}__${row.date}`;
+    agg.set(key, Math.round(((agg.get(key) || 0) + row.spend_usd) * 100) / 100);
+  }
+
+  let written = 0;
+  let batch = db.batch();
+  let inBatch = 0;
+  for (const [key, spend] of agg.entries()) {
+    const [appIdStr, date] = key.split("__");
+    batch.set(db.collection("ad_spend").doc(key), {
+      applicationId: Number(appIdStr),
+      app_name: ROAS_APP_NAMES[Number(appIdStr)] || String(appIdStr),
+      date,
+      spend_usd: spend,
+      source: "adjust",
+      updated_at: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    written++;
+    if (++inBatch >= 400) { await batch.commit(); batch = db.batch(); inBatch = 0; }
+  }
+  if (inBatch > 0) await batch.commit();
+  return { period, rowsFetched: rows.length, docsWritten: written };
+}
+
+functions.http("adjustSpendSync", async (req, res) => {
+  // Owner-token gated: desktop scheduled task calls with a gcloud access token
+  // resolving to the trusted owner. Mirrors churn/refund sync auth.
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
+    const periodRaw = req.query.period;
+    const period = typeof periodRaw === "string" && /^[-\d\sdtoay:]+$/i.test(periodRaw) ? periodRaw : undefined;
+    const r = await runAdjustSpendSync(period);
+    console.log("adjust spend sync:", JSON.stringify(r));
+    return res.status(200).json({ ok: true, ...r, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("adjustSpendSync error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- ROAS cohort rollup ----
+// For one app: cohort_day(otid) = day of min(purchasedAt) in ROAS_TZ. Proceeds
+// (refunds negated) are bucketed by age = ts_day − cohort_day into cumulative
+// D0/D7/D30/D90 sums, plus lifetime-to-date. Joined against ad_spend to compute
+// ROAS per spend-day. Only paid charge events count (trial starts fire at $0 and
+// carry no proceeds, so they're naturally ~0 at D0 for trial-gated apps).
+async function fetchRoasCohorts(appId) {
+  const sql = `
+WITH anchors AS (
+  SELECT originalTransactionId AS otid,
+    toDate(toTimeZone(min(purchasedAt), '${ROAS_TZ}')) AS cohort_day
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+  GROUP BY otid
+),
+ev AS (
+  SELECT a.cohort_day AS cohort_day, e.originalTransactionId AS otid,
+    dateDiff('day', a.cohort_day, toDate(toTimeZone(e.ts, '${ROAS_TZ}'))) AS age,
+    if(e.isRefund = 1, -abs(toFloat64(e.proceeds)), toFloat64(e.proceeds)) AS net
+  FROM open_revenue.attributed_events_by_ts_rep e
+  INNER JOIN anchors a ON e.originalTransactionId = a.otid
+  WHERE e.applicationId = ${Number(appId)} AND e.isSandbox = 0
+    AND e.name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+)
+SELECT toString(cohort_day) AS day,
+  uniqExact(otid) AS buyers,
+  round(sumIf(net, age <= 0), 2) AS d0,
+  round(sumIf(net, age <= 7), 2) AS d7,
+  round(sumIf(net, age <= 30), 2) AS d30,
+  round(sumIf(net, age <= 90), 2) AS d90,
+  round(sum(net), 2) AS lifetime
+FROM ev
+WHERE cohort_day >= today() - ${ROAS_WINDOW_DAYS}
+GROUP BY cohort_day ORDER BY cohort_day DESC
+FORMAT JSONEachRow`.trim();
+
+  const revRows = await swQuery(sql);
+
+  // Ad spend for the window, keyed by date.
+  const spendSnap = await db.collection("ad_spend")
+    .where("applicationId", "==", Number(appId))
+    .get();
+  const spendByDate = new Map();
+  spendSnap.forEach((d) => {
+    const v = d.data();
+    if (v && v.date) spendByDate.set(v.date, Number(v.spend_usd || 0));
+  });
+
+  // Today in ROAS_TZ as a YYYY-MM-DD string (for age gates). en-CA gives ISO.
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: ROAS_TZ }).format(new Date());
+  const todayMs = Date.parse(todayKey + "T00:00:00Z");
+
+  const rows = revRows.map((r) => {
+    const day = r.day;
+    const ageDays = Math.floor((todayMs - Date.parse(day + "T00:00:00Z")) / 86400000);
+    const spend = spendByDate.get(day);
+    const hasSpend = typeof spend === "number" && spend > 0;
+    // ROAS for a proceeds figure: null if no spend, or window not yet elapsed.
+    const roas = (procRaw, milestone) => {
+      if (procRaw == null) return null;
+      if (ageDays < milestone) return null;       // window not elapsed → "—"
+      if (!hasSpend) return null;                  // no spend that day → "—" (recent days pending)
+      return Math.round((Number(procRaw) / spend) * 100) / 100;
+    };
+    return {
+      day,
+      buyers: Number(r.buyers) || 0,
+      spend: hasSpend ? spend : null,
+      proceeds: Number(r.lifetime) || 0,
+      d0: roas(r.d0, 0),
+      d7: roas(r.d7, 7),
+      d30: roas(r.d30, 30),
+      d90: roas(r.d90, 90),
+      now: hasSpend ? Math.round((Number(r.lifetime) / spend) * 100) / 100 : null,
+    };
+  });
+
+  // Window totals (only days that have spend contribute to blended ROAS).
+  let totalSpend = 0, totalProceeds = 0;
+  rows.forEach((r) => { if (r.spend != null) { totalSpend += r.spend; totalProceeds += r.proceeds; } });
+  const blendedNow = totalSpend > 0 ? Math.round((totalProceeds / totalSpend) * 100) / 100 : null;
+
+  return {
+    appId: Number(appId),
+    appName: ROAS_APP_NAMES[Number(appId)] || String(appId),
+    tz: ROAS_TZ,
+    rows,
+    totals: {
+      spend: Math.round(totalSpend * 100) / 100,
+      proceeds: Math.round(totalProceeds * 100) / 100,
+      blendedNow,
+    },
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+functions.http("roasCohorts", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://localhost:8899",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
+    const appIdRaw = req.query.appId;
+    if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) return res.status(400).json({ error: "appId required" });
+    const data = await fetchRoasCohorts(Number(appIdRaw));
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("roasCohorts error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });

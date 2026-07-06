@@ -221,6 +221,7 @@
       <button class="section-btn" id="sectionRevenue" onclick="setSection('revenue')">Revenue</button>
       <button class="section-btn" id="sectionChurn" onclick="setSection('churn')">Churn</button>
       <button class="section-btn" id="sectionRefunds" onclick="setSection('refunds')">Refunds</button>
+      <button class="section-btn" id="sectionRoas" onclick="setSection('roas')">ROAS</button>
     </nav>
   </div>
 
@@ -394,12 +395,14 @@
       document.getElementById("sectionRevenue").className = "section-btn" + (sec === "revenue" ? " active" : "");
       document.getElementById("sectionChurn").className = "section-btn" + (sec === "churn" ? " active" : "");
       document.getElementById("sectionRefunds").className = "section-btn" + (sec === "refunds" ? " active" : "");
+      document.getElementById("sectionRoas").className = "section-btn" + (sec === "roas" ? " active" : "");
       // Activity-only controls hide off Activity via visibility (keeps the grid
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
       if (sec === "revenue") { renderPortfolio(); loadMrrSnapshots(); return; }
       if (sec === "churn") { renderChurn(); loadChurn(); return; }
       if (sec === "refunds") { renderRefunds(); loadRefunds(); return; }
+      if (sec === "roas") { renderRoas(); loadRoas(); return; }
       renderAll();
     };
 
@@ -1036,6 +1039,101 @@
           tip.style.opacity = "0";
         });
       });
+    }
+
+    // ---- ROAS (cohort-vaulted return on ad spend) ----
+    // Each spend-day's ROAS = Adjust spend that day ÷ ALL future proceeds from
+    // the users first acquired that day (cohort folded back to its spend-day).
+    // Precomputed daily into Firestore roas_cohorts/{appId} (payload JSON) by the
+    // sync routine — dashboard reads the doc directly, no ClickHouse on load.
+    const ROAS_APPS = [["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"]];
+    let roasApp = "32830";
+    let roasData = {};      // appId → payload
+    let roasInflight = {};  // appId → true while loading
+    let roasError = null;
+    window.setRoasApp = function(id) { roasApp = id; renderRoas(); loadRoas(); };
+
+    async function loadRoas() {
+      const key = roasApp;
+      if (roasData[key] || roasInflight[key]) return;
+      roasInflight[key] = true; roasError = null;
+      try {
+        const snap = await getDoc(doc(db, "roas_cohorts", key));
+        if (!snap.exists()) throw new Error("no data yet for this app");
+        roasData[key] = JSON.parse(snap.data().payload);
+      } catch (e) {
+        console.warn("roas load failed", e);
+        roasError = e.message;
+      } finally {
+        delete roasInflight[key];
+        if (section === "roas") renderRoas();
+      }
+    }
+
+    // Color band for a ROAS multiple: red < 0.7, orange 0.7–1.0, green > 1.0.
+    // null (window not elapsed / no spend) renders as a dim em-dash.
+    function roasColor(v) {
+      if (v == null) return "";
+      if (v < 0.7) return "#f87171";
+      if (v < 1.0) return "#fbbf24";
+      return "#4ade80";
+    }
+    function roasCell(v, strong) {
+      if (v == null) return '<td class="pf-t-num r dim">—</td>';
+      const c = roasColor(v);
+      const w = strong ? "600" : "600";
+      return '<td class="pf-t-num r" style="color:'+c+';font-weight:'+w+'">'+v.toFixed(2)+'×</td>';
+    }
+
+    function renderRoas() {
+      const container = document.getElementById("container");
+      const appBtns = ROAS_APPS.map(([id,name]) =>
+        '<button class="filter-btn '+(id===roasApp?"active":"")+'" onclick="setRoasApp(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      const d = roasData[roasApp];
+      const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
+      const header =
+        '<div class="pf-head">' +
+          '<div><div class="pf-m-label">ROAS · cohort-vaulted</div>' +
+            '<div class="ch-sub">Each spend-day ÷ all future proceeds from that day’s buyers. Rows mature rightward as renewals land.'+(synced?' · synced '+synced:'')+'</div></div>' +
+        '</div>' +
+        '<div class="ch-appbar">'+appBtns+'</div>';
+
+      if (!d && roasInflight[roasApp]) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
+      if (roasError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load ROAS</h2><p>'+roasError+'</p></div>'; return; }
+      if (!d) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
+
+      const t = d.totals || {};
+      const tiles =
+        '<div class="pf-metrics" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0">' +
+          '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
+            '<div class="pf-m-label">Spend (30d)</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(t.spend||0)+'</div></div>' +
+          '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
+            '<div class="pf-m-label">Proceeds to date</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(t.proceeds||0)+'</div></div>' +
+          '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
+            '<div class="pf-m-label">Blended ROAS now</div><div class="pf-m-value" style="font-size:26px;color:'+(t.blendedNow==null?"#fff":roasColor(t.blendedNow))+'">'+(t.blendedNow==null?"—":t.blendedNow.toFixed(2)+"×")+'</div></div>' +
+        '</div>';
+
+      const rows = (d.rows||[]).map(r => {
+        const spendCell = r.spend==null ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(r.spend)+'</td>';
+        return '<tr><td class="pf-t-app">'+fmtDayMon(r.day)+'</td>'+spendCell+
+          '<td class="pf-t-num r dim">'+r.buyers+'</td>'+
+          roasCell(r.d0)+roasCell(r.d7)+roasCell(r.d30)+roasCell(r.d90)+roasCell(r.now,true)+'</tr>';
+      }).join("");
+
+      const legend = '<div class="ch-legend">' +
+        '<span class="ch-lg"><i style="background:#f87171"></i>&lt; 0.7× underwater</span>' +
+        '<span class="ch-lg"><i style="background:#fbbf24"></i>0.7–1.0×</span>' +
+        '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 1.0× profitable</span>' +
+        '<span class="ch-lg"><i style="background:#333"></i>— window not elapsed / no spend</span></div>';
+
+      const table = '<div class="pf-apps"><h3>By spend day</h3><table class="pf-table"><thead><tr>' +
+        '<th>Spend day</th><th class="r">Spend</th><th class="r">Buyers</th>' +
+        '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th>' +
+        '</tr></thead><tbody>'+rows+'</tbody></table>' +
+        '<div class="ch-foot">Numerator = proceeds (net of store cut). Cohort day = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until that spend-day ages past the milestone, or if the day has no ad spend yet.</div></div>';
+
+      container.innerHTML = header + tiles + legend + table;
     }
 
     window.copyTxId = function(fullId, el, ev) {
