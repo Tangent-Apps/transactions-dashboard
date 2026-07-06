@@ -1189,7 +1189,7 @@
         const pts = [];
         data.forEach((b,i) => { const v=b.dx(s.m); if (v!=null) pts.push([x(i), y(v)]); });
         if (pts.length>1) series += '<polyline fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="'+pts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ")+'"/>';
-        pts.forEach(p => { series += '<circle cx="'+p[0].toFixed(1)+'" cy="'+p[1].toFixed(1)+'" r="3" fill="'+s.color+'"/>'; });
+        else if (pts.length===1) series += '<circle cx="'+pts[0][0].toFixed(1)+'" cy="'+pts[0][1].toFixed(1)+'" r="3" fill="'+s.color+'"/>';
       });
 
       // per-cohort hover: vertical guide + tooltip listing all series
