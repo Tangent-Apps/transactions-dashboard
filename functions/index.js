@@ -1321,7 +1321,10 @@ SELECT toString(cohort_day) AS day,
   uniqExact(otid) AS buyers,
   round(sumIf(net, age <= 0), 2) AS d0,
   round(sumIf(net, age <= 7), 2) AS d7,
+  round(sumIf(net, age <= 14), 2) AS d14,
   round(sumIf(net, age <= 30), 2) AS d30,
+  round(sumIf(net, age <= 45), 2) AS d45,
+  round(sumIf(net, age <= 60), 2) AS d60,
   round(sumIf(net, age <= 90), 2) AS d90,
   round(sum(net), 2) AS lifetime,
   -- total refunds ($, positive) charged back against this cohort, any age
@@ -1366,7 +1369,10 @@ FORMAT JSONEachRow`.trim();
       // cumulative proceeds ($) collected by each age; d0=at purchase, lifetime=to date
       p0: Number(r.d0) || 0,
       p7: Number(r.d7) || 0,
+      p14: Number(r.d14) || 0,
       p30: Number(r.d30) || 0,
+      p45: Number(r.d45) || 0,
+      p60: Number(r.d60) || 0,
       p90: Number(r.d90) || 0,
       proceeds: Number(r.lifetime) || 0,
       refunds: Number(r.refunds) || 0, // total refunds ($, positive) against this cohort

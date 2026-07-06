@@ -1055,6 +1055,7 @@
     let roasRange = 90;
     let roasGran = "day";   // day | week | month
     let roasShowRefunds = true;
+    let roasDx = 30;        // chart: which milestone age to plot ROAS at
     let roasData = {};      // "appId__geo" → payload
     let roasInflight = {};  // "appId__geo" → true while loading
     let roasError = null;
@@ -1064,6 +1065,7 @@
     window.setRoasRange = function(w) { roasRange = w; renderRoas(); };
     window.setRoasGran = function(g) { roasGran = g; renderRoas(); };
     window.toggleRoasRefunds = function() { roasShowRefunds = !roasShowRefunds; renderRoas(); };
+    window.setRoasDx = function(m) { roasDx = m; renderRoas(); };
 
     async function loadRoas() {
       const key = roasKey();
@@ -1118,37 +1120,99 @@
     // EVERY day in the bucket has aged past it (so a week's D7 needs the whole week
     // ≥7d old). Days with no spend are excluded from that bucket's spend/ratios but
     // still counted in buyers.
+    // Milestone ages we store raw proceeds for (backend p0/p7/.../p90).
+    const ROAS_MILESTONES = [0, 7, 14, 30, 45, 60, 90];
     function roasAggregate(rows, gran) {
       const buckets = new Map(); // key → agg
       for (const r of rows) {
         const b = roasBucket(r.day, gran);
         let a = buckets.get(b.key);
         if (!a) { a = { key:b.key, label:b.label, spend:0, hasSpend:false, buyers:0,
-          p0:0, p7:0, p30:0, p90:0, pLife:0, refunds:0, minAge:Infinity }; buckets.set(b.key, a); }
+          p:{0:0,7:0,14:0,30:0,45:0,60:0,90:0}, pLife:0, refunds:0, minAge:Infinity }; buckets.set(b.key, a); }
         a.buyers += r.buyers;
         a.minAge = Math.min(a.minAge, r.ageDays);
         a.refunds += (r.refunds || 0); // refunds tracked even for days with no spend
         if (r.spend != null) {
           a.spend += r.spend; a.hasSpend = true;
-          a.p0 += r.p0; a.p7 += r.p7; a.p30 += r.p30; a.p90 += r.p90; a.pLife += r.proceeds;
+          ROAS_MILESTONES.forEach(m => { a.p[m] += (r["p"+m] || 0); });
+          a.pLife += r.proceeds;
         }
       }
       const out = [...buckets.values()];
-      // newest first
-      out.sort((x,y) => x.key < y.key ? 1 : -1);
+      out.sort((x,y) => x.key < y.key ? 1 : -1); // newest first
       for (const a of out) {
-        const ratio = (proc, milestone) => {
+        // ROAS % at milestone m: null if no spend, or bucket not fully aged past m.
+        a.dx = (m) => {
           if (!a.hasSpend || a.spend <= 0) return null;
-          if (a.minAge < milestone) return null;
-          return (proc / a.spend) * 100;
+          if (a.minAge < m) return null;
+          return (a.p[m] / a.spend) * 100;
         };
-        a.d0 = ratio(a.p0, 0);
-        a.d7 = ratio(a.p7, 7);
-        a.d30 = ratio(a.p30, 30);
-        a.d90 = ratio(a.p90, 90);
+        a.d0 = a.dx(0); a.d7 = a.dx(7); a.d30 = a.dx(30); a.d90 = a.dx(90);
         a.now = a.hasSpend && a.spend > 0 ? (a.pLife / a.spend) * 100 : null;
       }
       return out;
+    }
+
+    // SVG chart: each cohort bucket's ROAS % at age `dx` vs a 100% break-even line.
+    // buckets = roasAggregate output (newest-first); we plot oldest→newest L→R.
+    // Matured buckets (minAge >= dx) = solid dot colored by ≥/<100%; pending
+    // (younger than dx) = hollow gray dot at partial ROAS. Line connects matured.
+    function buildRoasChart(buckets, dx, w, h) {
+      const data = buckets.slice().reverse(); // oldest → newest
+      const n = data.length;
+      if (!n) return '<div class="empty-state"><h2>No cohorts</h2><p>No spend in this window.</p></div>';
+      const padL = 40, padR = 14, padT = 14, padB = 34;
+      const iw = w - padL - padR, ih = h - padT - padB;
+      // value per bucket at dx (may be null=pending); partial ROAS for pending dots
+      const val = (b) => b.dx(dx);
+      const partial = (b) => (b.hasSpend && b.spend>0) ? (b.p[dx]/b.spend)*100 : null;
+      let maxV = 100;
+      data.forEach(b => { const v = val(b) ?? partial(b); if (v!=null && v>maxV) maxV = v; });
+      maxV = Math.ceil((maxV*1.1)/20)*20; // headroom, round to 20
+      const x = (i) => padL + (n===1 ? iw/2 : (i/(n-1))*iw);
+      const y = (v) => padT + ih - (v/maxV)*ih;
+
+      // y gridlines + labels every 20%
+      let grid = "";
+      for (let g=0; g<=maxV; g+=20) {
+        const gy = y(g).toFixed(1);
+        const is100 = g===100;
+        grid += '<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="'+(is100?"#8a8a8a":"#1f1f1f")+'" stroke-width="'+(is100?1.5:1)+'"'+(is100?' stroke-dasharray="5 4"':'')+'/>';
+        grid += '<text x="'+(padL-6)+'" y="'+(y(g)+3).toFixed(1)+'" fill="#777" font-size="9" text-anchor="end">'+g+'%</text>';
+      }
+      // 100% label chip on the break-even line
+      grid += '<text x="'+(w-padR)+'" y="'+(y(100)-4).toFixed(1)+'" fill="#8a8a8a" font-size="9" text-anchor="end">break-even</text>';
+
+      // line through matured points only
+      const matured = [];
+      data.forEach((b,i) => { const v=val(b); if (v!=null) matured.push([x(i), y(Math.min(v,maxV))]); });
+      let line = "";
+      if (matured.length>1) {
+        line = '<polyline fill="none" stroke="#5b8def" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="'+matured.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ")+'"/>';
+      }
+      // dots
+      let dots = "", hits = "";
+      data.forEach((b,i) => {
+        const v = val(b);
+        const px = x(i);
+        if (v==null) {
+          const pv = partial(b);
+          if (pv!=null) dots += '<circle cx="'+px.toFixed(1)+'" cy="'+y(Math.min(pv,maxV)).toFixed(1)+'" r="4" fill="#0f0f0f" stroke="#666" stroke-width="1.5"/>';
+        } else {
+          const col = v>=100 ? "#4ade80" : "#f87171";
+          dots += '<circle cx="'+px.toFixed(1)+'" cy="'+y(Math.min(v,maxV)).toFixed(1)+'" r="4.5" fill="'+col+'"/>';
+        }
+        // hover hit + tooltip data
+        const disp = v==null ? "pending" : Math.round(v)+"%";
+        hits += '<rect class="rc-hit" data-i="'+i+'" x="'+(px-iw/(2*Math.max(n,1))).toFixed(1)+'" y="'+padT+'" width="'+(iw/Math.max(n,1)).toFixed(1)+'" height="'+ih+'" fill="transparent"><title>'+b.label+' · D'+dx+' '+disp+'</title></rect>';
+      });
+
+      // x labels: first, mid, last (avoid crowding)
+      let xlab = "";
+      const idxs = n>2 ? [0, Math.floor(n/2), n-1] : data.map((_,i)=>i);
+      idxs.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-8)+'" fill="#777" font-size="9" text-anchor="middle">'+(data[i].label.replace("Week of ","")).slice(0,7)+'</text>'; });
+
+      return '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;display:block">'+grid+line+dots+hits+xlab+'</svg>';
     }
 
     function renderRoas() {
@@ -1220,6 +1284,23 @@
         '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 100% profitable</span>' +
         '<span class="ch-lg"><i style="background:#333"></i>— not matured / no spend</span></div>';
 
+      // ---- Chart: ROAS at selected Dx vs 100% break-even ----
+      const dxBtns = ROAS_MILESTONES.map(m =>
+        '<button class="pf-range-btn '+(m===roasDx?"active":"")+'" onclick="setRoasDx('+m+')">D'+m+'</button>'
+      ).join("");
+      const chartSvg = buildRoasChart(buckets, roasDx, 900, 300);
+      const chartLegend = '<div class="ch-legend">' +
+        '<span class="ch-lg"><i style="background:#5b8def"></i>ROAS at D'+roasDx+'</span>' +
+        '<span class="ch-lg"><i style="background:#4ade80"></i>≥100%</span>' +
+        '<span class="ch-lg"><i style="background:#f87171"></i>&lt;100%</span>' +
+        '<span class="ch-lg"><i style="background:#0f0f0f;border:1.5px solid #666"></i>pending (not aged to D'+roasDx+')</span></div>';
+      const chart = '<div class="pf-apps" style="margin-bottom:14px">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px">' +
+          '<h3 style="margin:0">ROAS at day <span style="color:#5b8def">D'+roasDx+'</span> vs break-even</h3>' +
+          '<div class="pf-ranges">'+dxBtns+'</div>' +
+        '</div>' + chartLegend +
+        '<div class="pf-chart-wrap">'+chartSvg+'</div></div>';
+
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
       const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
         '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>'+(roasShowRefunds?'<th class="r">Refunds</th>':'') +
@@ -1227,7 +1308,7 @@
         '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
         '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until every day in the period has aged past that milestone, or the period has no ad spend.</div></div>';
 
-      container.innerHTML = header + tiles + legend + table;
+      container.innerHTML = header + tiles + chart + table;
     }
 
     window.copyTxId = function(fullId, el, ev) {
