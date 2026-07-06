@@ -1178,71 +1178,6 @@
       return null; // never crossed → not paid back
     }
 
-    // Break-even scatter: x = cohort date, y = exact days-to-break-even (from the
-    // running-sum curve). One dot per cohort + dashed trend through paid-back
-    // cohorts. A dedicated "not paid back" strip sits ABOVE the plot (own band),
-    // separate from the 0d gridline, so same-day payback (D0) and never-paid-back
-    // don't collide. Tooltip shows the exact break-even DATE.
-    function fmtISODate(iso) { return fmtDayMon(iso); } // "2026-04-20" → "20 Apr"
-    function buildRoasChart(buckets, w, h) {
-      const data = buckets.slice().reverse(); // oldest → newest
-      const rows = data.map(b => ({ b, be: roasBreakEven(b) })).filter(r => r.be !== undefined);
-      const n = rows.length;
-      if (!n) return '<div class="empty-state"><h2>No cohorts</h2><p>No spend in this window.</p></div>';
-      const padL = 44, padR = 14, padT = 14, openBand = 22, padB = 30;
-      const plotTop = padT + openBand;      // plot area starts below the open strip
-      const iw = w - padL - padR, ih = h - plotTop - padB;
-
-      const paid = rows.filter(r => r.be !== null).map(r => r.be.age);
-      let maxBE = paid.length ? Math.max(...paid) : 30;
-      maxBE = Math.max(30, Math.ceil((maxBE*1.15)/15)*15);
-      const x = (i) => padL + (n===1 ? iw/2 : (i/(n-1))*iw);
-      const y = (d) => plotTop + (d/maxBE)*ih; // 0d at plotTop, more days lower
-      const openY = padT + openBand/2;         // "not paid back" strip center
-
-      // open-band separator + label
-      let grid = '<line x1="'+padL+'" y1="'+(plotTop).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+(plotTop).toFixed(1)+'" stroke="#2a2a2a" stroke-dasharray="2 2"/>';
-      grid += '<text x="'+(padL-6)+'" y="'+(openY+3).toFixed(1)+'" fill="#888" font-size="8.5" text-anchor="end">open</text>';
-      // y gridlines (days) every 15
-      for (let g=0; g<=maxBE; g+=15) {
-        grid += '<line x1="'+padL+'" y1="'+y(g).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y(g).toFixed(1)+'" stroke="#1f1f1f"/>';
-        grid += '<text x="'+(padL-6)+'" y="'+(y(g)+3).toFixed(1)+'" fill="#777" font-size="9" text-anchor="end">'+g+'d</text>';
-      }
-
-      // trend line through paid-back dots
-      const paidPts = [];
-      rows.forEach((r,i) => { if (r.be !== null) paidPts.push([x(i), y(r.be.age)]); });
-      let trend = "";
-      if (paidPts.length > 1) {
-        trend = '<polyline fill="none" stroke="#3a3a3a" stroke-width="1.5" stroke-dasharray="4 3" points="'+paidPts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ")+'"/>';
-      }
-
-      // dots + hover
-      let dots = "", hits = "";
-      rows.forEach((r,i) => {
-        const px = x(i);
-        let cy, mk, tip;
-        if (r.be === null) {
-          cy = openY; mk = '<circle cx="'+px.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="4" fill="#0f0f0f" stroke="#777" stroke-width="1.5"/>';
-          tip = r.b.label + '\nnot paid back yet (ROAS ' + Math.round(r.b.now||0) + '%)';
-        } else {
-          cy = y(r.be.age);
-          const col = r.be.age<=30 ? "#4ade80" : r.be.age<=60 ? "#ef9f27" : "#f0997b";
-          mk = '<circle cx="'+px.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="4.5" fill="'+col+'"/>';
-          tip = r.b.label + '\nbroke even ' + fmtISODate(r.be.date) + ' (D' + r.be.age + ')';
-        }
-        dots += mk;
-        hits += '<rect class="rc-hit" x="'+(px-iw/(2*Math.max(n,1))).toFixed(1)+'" y="'+padT+'" width="'+(iw/Math.max(n,1)).toFixed(1)+'" height="'+(h-padT-padB).toFixed(1)+'" fill="transparent"><title>'+tip+'</title></rect>';
-      });
-
-      // x labels: first, mid, last
-      let xlab = "";
-      const idxs = n>2 ? [0, Math.floor(n/2), n-1] : rows.map((_,i)=>i);
-      idxs.forEach(i => { xlab += '<text x="'+x(i).toFixed(1)+'" y="'+(h-8)+'" fill="#777" font-size="9" text-anchor="middle">'+(rows[i].b.label.replace("Week of ","")).slice(0,7)+'</text>'; });
-
-      return '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;display:block">'+grid+trend+dots+hits+xlab+'</svg>';
-    }
-
     function renderRoas() {
       const container = document.getElementById("container");
       const appBtns = ROAS_APPS.map(([id,name]) =>
@@ -1316,17 +1251,6 @@
         '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 100% profitable</span>' +
         '<span class="ch-lg"><i style="background:#333"></i>— not matured / no spend</span></div>';
 
-      // ---- Chart: days-to-break-even per cohort ----
-      const chartSvg = buildRoasChart(buckets, 900, 300);
-      const chartLegend = '<div class="ch-legend">' +
-        '<span class="ch-lg"><i style="background:#4ade80"></i>≤30d</span>' +
-        '<span class="ch-lg"><i style="background:#ef9f27"></i>31–60d</span>' +
-        '<span class="ch-lg"><i style="background:#f0997b"></i>&gt;60d</span>' +
-        '<span class="ch-lg"><i style="background:#0f0f0f;border:1.5px solid #777"></i>not paid back</span></div>';
-      const chart = '<div class="pf-apps" style="margin-bottom:14px">' +
-        '<h3 style="margin:0 0 10px">Days to break even by cohort <span style="color:#666;font-weight:400;text-transform:none;letter-spacing:0">· hover for exact date</span></h3>' + chartLegend +
-        '<div class="pf-chart-wrap">'+chartSvg+'</div></div>';
-
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
       const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
         '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>'+(roasShowRefunds?'<th class="r">Refunds</th>':'') +
@@ -1334,7 +1258,7 @@
         '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
         '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Break-even = exact date cumulative proceeds first covered spend (running-summed from per-day events). Refunds subtract from their original cohort.</div></div>';
 
-      container.innerHTML = header + tiles + chart + table;
+      container.innerHTML = header + tiles + table;
     }
 
     window.copyTxId = function(fullId, el, ev) {
