@@ -1054,6 +1054,7 @@
     let roasGeo = "all";
     let roasRange = 90;
     let roasGran = "day";   // day | week | month
+    let roasShowRefunds = true;
     let roasData = {};      // "appId__geo" → payload
     let roasInflight = {};  // "appId__geo" → true while loading
     let roasError = null;
@@ -1062,6 +1063,7 @@
     window.setRoasGeo = function(g) { roasGeo = g; renderRoas(); loadRoas(); };
     window.setRoasRange = function(w) { roasRange = w; renderRoas(); };
     window.setRoasGran = function(g) { roasGran = g; renderRoas(); };
+    window.toggleRoasRefunds = function() { roasShowRefunds = !roasShowRefunds; renderRoas(); };
 
     async function loadRoas() {
       const key = roasKey();
@@ -1163,6 +1165,7 @@
       const geoBtns = ROAS_GEOS.map(([g,name]) =>
         '<button class="pf-range-btn '+(g===roasGeo?"active":"")+'" onclick="setRoasGeo(\''+g+'\')">'+name+'</button>'
       ).join("");
+      const refBtn = '<button class="pf-range-btn '+(roasShowRefunds?"active":"")+'" onclick="toggleRoasRefunds()">Refunds</button>';
       const d = roasData[roasKey()];
       const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
       const header =
@@ -1173,6 +1176,7 @@
             '<div class="pf-ranges">'+geoBtns+'</div>' +
             '<div class="pf-ranges">'+granBtns+'</div>' +
             '<div class="pf-ranges">'+ranBtns+'</div>' +
+            '<div class="pf-ranges">'+refBtn+'</div>' +
           '</div>' +
         '</div>' +
         '<div class="ch-appbar">'+appBtns+'</div>';
@@ -1205,7 +1209,7 @@
       const bodyRows = buckets.map(b => {
         const spendCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>';
         const procCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.pLife)+'</td>';
-        const refCell = b.refunds > 0 ? '<td class="pf-t-num r" style="color:#f87171">-'+fmtMoney(b.refunds)+'</td>' : '<td class="pf-t-num r dim">—</td>';
+        const refCell = !roasShowRefunds ? '' : (b.refunds > 0 ? '<td class="pf-t-num r" style="color:#f87171">-'+fmtMoney(b.refunds)+'</td>' : '<td class="pf-t-num r dim">—</td>');
         return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+refCell+
           roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+'</tr>';
       }).join("");
@@ -1218,7 +1222,7 @@
 
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
       const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
-        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th><th class="r">Refunds</th>' +
+        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>'+(roasShowRefunds?'<th class="r">Refunds</th>':'') +
         '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th>' +
         '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
         '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until every day in the period has aged past that milestone, or the period has no ad spend.</div></div>';
