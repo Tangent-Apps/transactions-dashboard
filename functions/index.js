@@ -1160,7 +1160,7 @@ const ROAS_APPS = [32830, 22372, 35269]; // GirlWalk, GirlTalk, Poly AI
 // Maturity gates: a spend-day's DN column is only meaningful once N full days
 // have elapsed since that day. Below the gate we return null (shown as "—").
 const ROAS_MILESTONES = [0, 7, 30, 90];
-const ROAS_WINDOW_DAYS = 30; // how many recent spend-days to show
+const ROAS_WINDOW_DAYS = 180; // how many recent spend-days to compute (dashboard filters to 30/60/90/180)
 
 // ---- Adjust spend ingest ----
 // Pull per-app per-day cost from Adjust. datePeriod is an Adjust date_period
@@ -1303,46 +1303,36 @@ FORMAT JSONEachRow`.trim();
   const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: ROAS_TZ }).format(new Date());
   const todayMs = Date.parse(todayKey + "T00:00:00Z");
 
+  // Emit RAW DOLLARS per day (proceeds cumulative at each age milestone + spend +
+  // age). The dashboard divides and aggregates into day/week/month views itself —
+  // ROAS ratios must be computed from summed dollars, not by averaging per-day
+  // ratios, so the backend stays ratio-free. spend is null if that day has no
+  // ad_spend doc yet (e.g. today, before Adjust reports).
   const rows = revRows.map((r) => {
     const day = r.day;
     const ageDays = Math.floor((todayMs - Date.parse(day + "T00:00:00Z")) / 86400000);
     const spend = spendByDate.get(day);
     const hasSpend = typeof spend === "number" && spend > 0;
-    // ROAS for a proceeds figure: null if no spend, or window not yet elapsed.
-    const roas = (procRaw, milestone) => {
-      if (procRaw == null) return null;
-      if (ageDays < milestone) return null;       // window not elapsed → "—"
-      if (!hasSpend) return null;                  // no spend that day → "—" (recent days pending)
-      return Math.round((Number(procRaw) / spend) * 100) / 100;
-    };
     return {
       day,
+      ageDays,
       buyers: Number(r.buyers) || 0,
-      spend: hasSpend ? spend : null,
+      spend: hasSpend ? Math.round(spend * 100) / 100 : null,
+      // cumulative proceeds ($) collected by each age; d0=at purchase, lifetime=to date
+      p0: Number(r.d0) || 0,
+      p7: Number(r.d7) || 0,
+      p30: Number(r.d30) || 0,
+      p90: Number(r.d90) || 0,
       proceeds: Number(r.lifetime) || 0,
-      d0: roas(r.d0, 0),
-      d7: roas(r.d7, 7),
-      d30: roas(r.d30, 30),
-      d90: roas(r.d90, 90),
-      now: hasSpend ? Math.round((Number(r.lifetime) / spend) * 100) / 100 : null,
     };
   });
-
-  // Window totals (only days that have spend contribute to blended ROAS).
-  let totalSpend = 0, totalProceeds = 0;
-  rows.forEach((r) => { if (r.spend != null) { totalSpend += r.spend; totalProceeds += r.proceeds; } });
-  const blendedNow = totalSpend > 0 ? Math.round((totalProceeds / totalSpend) * 100) / 100 : null;
 
   return {
     appId: Number(appId),
     appName: ROAS_APP_NAMES[Number(appId)] || String(appId),
     tz: ROAS_TZ,
+    windowDays: ROAS_WINDOW_DAYS,
     rows,
-    totals: {
-      spend: Math.round(totalSpend * 100) / 100,
-      proceeds: Math.round(totalProceeds * 100) / 100,
-      blendedNow,
-    },
     generatedAt: new Date().toISOString(),
   };
 }

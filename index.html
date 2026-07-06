@@ -1042,16 +1042,22 @@
     }
 
     // ---- ROAS (cohort-vaulted return on ad spend) ----
-    // Each spend-day's ROAS = Adjust spend that day ÷ ALL future proceeds from
-    // the users first acquired that day (cohort folded back to its spend-day).
-    // Precomputed daily into Firestore roas_cohorts/{appId} (payload JSON) by the
-    // sync routine — dashboard reads the doc directly, no ClickHouse on load.
+    // Each spend-day's ROAS = future proceeds from that day's buyers ÷ spend that day.
+    // Backend writes RAW DOLLARS per day (proceeds cumulative at D0/D7/D30/D90 + spend
+    // + age) into roas_cohorts/{appId}; the client filters by range, buckets into
+    // day/week/month, and computes ROAS % = sum(proceeds)/sum(spend)×100 per bucket.
+    // Ratios are always from summed dollars, never averaged per-day ratios.
     const ROAS_APPS = [["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"]];
+    const ROAS_RANGES = [30, 60, 90, 180, 0]; // 0 = All
     let roasApp = "32830";
+    let roasRange = 90;
+    let roasGran = "day";   // day | week | month
     let roasData = {};      // appId → payload
     let roasInflight = {};  // appId → true while loading
     let roasError = null;
     window.setRoasApp = function(id) { roasApp = id; renderRoas(); loadRoas(); };
+    window.setRoasRange = function(w) { roasRange = w; renderRoas(); };
+    window.setRoasGran = function(g) { roasGran = g; renderRoas(); };
 
     async function loadRoas() {
       const key = roasApp;
@@ -1070,19 +1076,72 @@
       }
     }
 
-    // Color band for a ROAS multiple: red < 0.7, orange 0.7–1.0, green > 1.0.
+    // Color band for a ROAS % : red < 70, orange 70–100, green > 100.
     // null (window not elapsed / no spend) renders as a dim em-dash.
-    function roasColor(v) {
-      if (v == null) return "";
-      if (v < 0.7) return "#f87171";
-      if (v < 1.0) return "#fbbf24";
+    function roasColor(pct) {
+      if (pct == null) return "";
+      if (pct < 70) return "#f87171";
+      if (pct < 100) return "#fbbf24";
       return "#4ade80";
     }
-    function roasCell(v, strong) {
-      if (v == null) return '<td class="pf-t-num r dim">—</td>';
-      const c = roasColor(v);
-      const w = strong ? "600" : "600";
-      return '<td class="pf-t-num r" style="color:'+c+';font-weight:'+w+'">'+v.toFixed(2)+'×</td>';
+    function roasCell(pct, strong) {
+      if (pct == null) return '<td class="pf-t-num r dim">—</td>';
+      return '<td class="pf-t-num r" style="color:'+roasColor(pct)+(strong?';font-weight:600':'')+'">'+Math.round(pct)+'%</td>';
+    }
+
+    // Bucket key + label for a YYYY-MM-DD day at the chosen granularity.
+    // Week = ISO-ish Monday start (matches churn/refund weekly convention).
+    function roasBucket(dayStr, gran) {
+      const p = dayStr.split("-").map(Number);
+      const dt = new Date(Date.UTC(p[0], p[1]-1, p[2]));
+      if (gran === "month") {
+        const key = p[0]+"-"+String(p[1]).padStart(2,"0");
+        return { key, label: MON[p[1]-1] + " " + p[0] };
+      }
+      if (gran === "week") {
+        const dow = (dt.getUTCDay() + 6) % 7; // Mon=0
+        dt.setUTCDate(dt.getUTCDate() - dow);
+        const wk = dt.toISOString().slice(0,10);
+        return { key: wk, label: "Week of " + fmtDayMon(wk) };
+      }
+      return { key: dayStr, label: fmtDayMon(dayStr) };
+    }
+
+    // Aggregate raw-dollar day rows into buckets. Each bucket sums spend + proceeds
+    // per milestone; ROAS % = proceeds/spend×100. A milestone is gated (null) unless
+    // EVERY day in the bucket has aged past it (so a week's D7 needs the whole week
+    // ≥7d old). Days with no spend are excluded from that bucket's spend/ratios but
+    // still counted in buyers.
+    function roasAggregate(rows, gran) {
+      const buckets = new Map(); // key → agg
+      for (const r of rows) {
+        const b = roasBucket(r.day, gran);
+        let a = buckets.get(b.key);
+        if (!a) { a = { key:b.key, label:b.label, spend:0, hasSpend:false, buyers:0,
+          p0:0, p7:0, p30:0, p90:0, pLife:0, minAge:Infinity }; buckets.set(b.key, a); }
+        a.buyers += r.buyers;
+        a.minAge = Math.min(a.minAge, r.ageDays);
+        if (r.spend != null) {
+          a.spend += r.spend; a.hasSpend = true;
+          a.p0 += r.p0; a.p7 += r.p7; a.p30 += r.p30; a.p90 += r.p90; a.pLife += r.proceeds;
+        }
+      }
+      const out = [...buckets.values()];
+      // newest first
+      out.sort((x,y) => x.key < y.key ? 1 : -1);
+      for (const a of out) {
+        const ratio = (proc, milestone) => {
+          if (!a.hasSpend || a.spend <= 0) return null;
+          if (a.minAge < milestone) return null;
+          return (proc / a.spend) * 100;
+        };
+        a.d0 = ratio(a.p0, 0);
+        a.d7 = ratio(a.p7, 7);
+        a.d30 = ratio(a.p30, 30);
+        a.d90 = ratio(a.p90, 90);
+        a.now = a.hasSpend && a.spend > 0 ? (a.pLife / a.spend) * 100 : null;
+      }
+      return out;
     }
 
     function renderRoas() {
@@ -1090,12 +1149,22 @@
       const appBtns = ROAS_APPS.map(([id,name]) =>
         '<button class="filter-btn '+(id===roasApp?"active":"")+'" onclick="setRoasApp(\''+id+'\')">'+name+'</button>'
       ).join("");
+      const ranBtns = ROAS_RANGES.map(w =>
+        '<button class="pf-range-btn '+(w===roasRange?"active":"")+'" onclick="setRoasRange('+w+')">'+(w===0?"All":w+"D")+'</button>'
+      ).join("");
+      const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) =>
+        '<button class="pf-range-btn '+(g===roasGran?"active":"")+'" onclick="setRoasGran(\''+g+'\')">'+name+'</button>'
+      ).join("");
       const d = roasData[roasApp];
       const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
       const header =
         '<div class="pf-head">' +
           '<div><div class="pf-m-label">ROAS · cohort-vaulted</div>' +
-            '<div class="ch-sub">Each spend-day ÷ all future proceeds from that day’s buyers. Rows mature rightward as renewals land.'+(synced?' · synced '+synced:'')+'</div></div>' +
+            '<div class="ch-sub">Each spend period ÷ all future proceeds from that period’s buyers. Matures as renewals land.'+(synced?' · synced '+synced:'')+'</div></div>' +
+          '<div class="ch-filters">' +
+            '<div class="pf-ranges">'+granBtns+'</div>' +
+            '<div class="pf-ranges">'+ranBtns+'</div>' +
+          '</div>' +
         '</div>' +
         '<div class="ch-appbar">'+appBtns+'</div>';
 
@@ -1103,35 +1172,46 @@
       if (roasError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load ROAS</h2><p>'+roasError+'</p></div>'; return; }
       if (!d) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
 
-      const t = d.totals || {};
+      // range filter on the raw daily rows (by age), then aggregate to granularity
+      let rows = (d.rows||[]);
+      if (roasRange > 0) rows = rows.filter(r => r.ageDays <= roasRange);
+      const buckets = roasAggregate(rows, roasGran);
+
+      // window totals from summed dollars
+      let totalSpend = 0, totalProceeds = 0;
+      rows.forEach(r => { if (r.spend != null) { totalSpend += r.spend; totalProceeds += r.proceeds; } });
+      const blended = totalSpend > 0 ? (totalProceeds/totalSpend)*100 : null;
+      const rangeLabel = roasRange === 0 ? "all" : roasRange + "d";
+
       const tiles =
         '<div class="pf-metrics" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0">' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
-            '<div class="pf-m-label">Spend (30d)</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(t.spend||0)+'</div></div>' +
+            '<div class="pf-m-label">Spend ('+rangeLabel+')</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalSpend)+'</div></div>' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
-            '<div class="pf-m-label">Proceeds to date</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(t.proceeds||0)+'</div></div>' +
+            '<div class="pf-m-label">Proceeds to date</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalProceeds)+'</div></div>' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
-            '<div class="pf-m-label">Blended ROAS now</div><div class="pf-m-value" style="font-size:26px;color:'+(t.blendedNow==null?"#fff":roasColor(t.blendedNow))+'">'+(t.blendedNow==null?"—":t.blendedNow.toFixed(2)+"×")+'</div></div>' +
+            '<div class="pf-m-label">Blended ROAS now</div><div class="pf-m-value" style="font-size:26px;color:'+(blended==null?"#fff":roasColor(blended))+'">'+(blended==null?"—":Math.round(blended)+"%")+'</div></div>' +
         '</div>';
 
-      const rows = (d.rows||[]).map(r => {
-        const spendCell = r.spend==null ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(r.spend)+'</td>';
-        return '<tr><td class="pf-t-app">'+fmtDayMon(r.day)+'</td>'+spendCell+
-          '<td class="pf-t-num r dim">'+r.buyers+'</td>'+
-          roasCell(r.d0)+roasCell(r.d7)+roasCell(r.d30)+roasCell(r.d90)+roasCell(r.now,true)+'</tr>';
+      const bodyRows = buckets.map(b => {
+        const spendCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>';
+        return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+
+          '<td class="pf-t-num r dim">'+b.buyers+'</td>'+
+          roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+'</tr>';
       }).join("");
 
       const legend = '<div class="ch-legend">' +
-        '<span class="ch-lg"><i style="background:#f87171"></i>&lt; 0.7× underwater</span>' +
-        '<span class="ch-lg"><i style="background:#fbbf24"></i>0.7–1.0×</span>' +
-        '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 1.0× profitable</span>' +
-        '<span class="ch-lg"><i style="background:#333"></i>— window not elapsed / no spend</span></div>';
+        '<span class="ch-lg"><i style="background:#f87171"></i>&lt; 70% underwater</span>' +
+        '<span class="ch-lg"><i style="background:#fbbf24"></i>70–100%</span>' +
+        '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 100% profitable</span>' +
+        '<span class="ch-lg"><i style="background:#333"></i>— not matured / no spend</span></div>';
 
-      const table = '<div class="pf-apps"><h3>By spend day</h3><table class="pf-table"><thead><tr>' +
-        '<th>Spend day</th><th class="r">Spend</th><th class="r">Buyers</th>' +
+      const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
+      const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
+        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Buyers</th>' +
         '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th>' +
-        '</tr></thead><tbody>'+rows+'</tbody></table>' +
-        '<div class="ch-foot">Numerator = proceeds (net of store cut). Cohort day = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until that spend-day ages past the milestone, or if the day has no ad spend yet.</div></div>';
+        '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
+        '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until every day in the period has aged past that milestone, or the period has no ad spend.</div></div>';
 
       container.innerHTML = header + tiles + legend + table;
     }

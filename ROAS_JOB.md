@@ -20,8 +20,14 @@ cohorts calls `dailyCohortSync`. That function now also pulls spend (`adjustSpen
 
 ## Collections (Cloud-Function-write only; dashboard reads with dashboard claim)
 - `ad_spend/{appId}__{YYYY-MM-DD}` — daily spend per app.
-- `roas_cohorts/{appId}` — precomputed maturity table (JSON `payload`), like
-  churn_cohorts / refund_cohorts.
+- `roas_cohorts/{appId}` — precomputed **raw-dollar** daily rows (180d window, JSON
+  `payload`). Each row = spend + proceeds cumulative at D0/D7/D30/D90 + lifetime + age.
+  The dashboard filters by range (30/60/90/180/All), buckets into day/week/month, and
+  computes ROAS % = Σproceeds/Σspend×100 per bucket. Ratios never come from the backend.
+
+To seed more history after changing the window, backfill spend once:
+`curl "$BASE/adjustSpendSync?period=-180d:-0d" -H "Authorization: Bearer $(gcloud auth print-access-token)"`
+then run `dailyCohortSync`.
 
 ## App mapping (Adjust label → Superwall applicationId)
 - `Girl Walk` → 32830 (GirlWalk)
