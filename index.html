@@ -1160,7 +1160,7 @@
       const header =
         '<div class="pf-head">' +
           '<div><div class="pf-m-label">ROAS · cohort-vaulted</div>' +
-            '<div class="ch-sub">Each spend period ÷ all future proceeds from that period’s buyers. Matures as renewals land.'+(synced?' · synced '+synced:'')+'</div></div>' +
+            (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>' +
           '<div class="ch-filters">' +
             '<div class="pf-ranges">'+granBtns+'</div>' +
             '<div class="pf-ranges">'+ranBtns+'</div>' +
@@ -1195,8 +1195,8 @@
 
       const bodyRows = buckets.map(b => {
         const spendCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>';
-        return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+
-          '<td class="pf-t-num r dim">'+b.buyers+'</td>'+
+        const procCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.pLife)+'</td>';
+        return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+
           roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+'</tr>';
       }).join("");
 
@@ -1208,7 +1208,7 @@
 
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
       const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
-        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Buyers</th>' +
+        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>' +
         '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th>' +
         '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
         '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until every day in the period has aged past that milestone, or the period has no ad spend.</div></div>';
