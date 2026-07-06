@@ -1126,14 +1126,18 @@
         const b = roasBucket(r.day, gran);
         let a = buckets.get(b.key);
         if (!a) { a = { key:b.key, label:b.label, spend:0, hasSpend:false, buyers:0,
-          p:{0:0,7:0,14:0,30:0,45:0,60:0,90:0}, pLife:0, refunds:0, minAge:Infinity }; buckets.set(b.key, a); }
+          p:{0:0,7:0,14:0,30:0,45:0,60:0,90:0}, pLife:0, refunds:0, minAge:Infinity,
+          curveByAge:{}, cohortStart:r.day }; buckets.set(b.key, a); }
         a.buyers += r.buyers;
         a.minAge = Math.min(a.minAge, r.ageDays);
+        if (r.day < a.cohortStart) a.cohortStart = r.day; // earliest cohort-day in bucket
         a.refunds += (r.refunds || 0); // refunds tracked even for days with no spend
         if (r.spend != null) {
           a.spend += r.spend; a.hasSpend = true;
           ROAS_MILESTONES.forEach(m => { a.p[m] += (r["p"+m] || 0); });
           a.pLife += r.proceeds;
+          // merge per-age net curve (age relative to each cohort-day; summed by age)
+          (r.curve || []).forEach(pt => { const age = pt[0]; a.curveByAge[age] = (a.curveByAge[age] || 0) + pt[1]; });
         }
       }
       const out = [...buckets.values()];
@@ -1152,63 +1156,62 @@
     }
 
     // SVG chart: one line per Dx maturity (D0/D7/D14/D30) across cohort buckets,
-    // Break-even day per cohort: the age (interpolated between milestones) where
-    // cumulative net ROAS first reaches 100%. Uses the raw-dollar milestone sums
-    // p0/p7/.../p90 plus lifetime@minAge as the last anchor. Returns:
-    //   number  → days to break even
-    //   null    → not paid back yet (lifetime ROAS still < 100%)
-    //   0       → already ≥100% at D0
-    // Only considers milestones the bucket has actually aged past (minAge).
-    function roasBreakEvenDay(b) {
-      if (!b.hasSpend || b.spend <= 0) return undefined; // no spend → not plottable
-      const anchors = ROAS_MILESTONES
-        .filter(m => m <= b.minAge)
-        .map(m => [m, (b.p[m] / b.spend) * 100]);
-      // final anchor: lifetime ROAS at current age (captures renewals past D90)
-      anchors.push([b.minAge, (b.pLife / b.spend) * 100]);
-      // dedupe/keep ascending by age
-      anchors.sort((a,c) => a[0]-c[0]);
-      if (anchors[0][1] >= 100) return 0;
-      for (let i=1; i<anchors.length; i++) {
-        const [a0,r0] = anchors[i-1], [a1,r1] = anchors[i];
-        if (r1 >= 100) {
-          if (r1 === r0) return a1;
-          return Math.round(a0 + (100 - r0) / (r1 - r0) * (a1 - a0));
+    // Exact break-even per cohort bucket, from the merged per-age net curve:
+    // running-sum net proceeds by age; the first age where cumulative ≥ bucket
+    // spend is the exact break-even age. Break-even DATE = earliest cohort-day in
+    // the bucket + that age. Returns:
+    //   undefined → no spend (not plottable)
+    //   null      → not paid back yet (cumulative never reached spend)
+    //   { age, date } → exact break-even age (days) + ISO date string
+    function roasBreakEven(b) {
+      if (!b.hasSpend || b.spend <= 0) return undefined;
+      const ages = Object.keys(b.curveByAge).map(Number).sort((x,y) => x-y);
+      let cum = 0;
+      for (const age of ages) {
+        cum += b.curveByAge[age];
+        if (cum >= b.spend) {
+          const dt = new Date(b.cohortStart + "T00:00:00Z");
+          dt.setUTCDate(dt.getUTCDate() + age);
+          return { age, date: dt.toISOString().slice(0,10) };
         }
       }
-      return null; // never reached 100% within its lifetime → open
+      return null; // never crossed → not paid back
     }
 
-    // Break-even scatter: x = cohort date, y = days-to-break-even. One dot per
-    // cohort + a dashed trend line through paid-back cohorts. Cohorts not yet paid
-    // back render as hollow dots pinned to an "open" band at the top.
+    // Break-even scatter: x = cohort date, y = exact days-to-break-even (from the
+    // running-sum curve). One dot per cohort + dashed trend through paid-back
+    // cohorts. A dedicated "not paid back" strip sits ABOVE the plot (own band),
+    // separate from the 0d gridline, so same-day payback (D0) and never-paid-back
+    // don't collide. Tooltip shows the exact break-even DATE.
+    function fmtISODate(iso) { return fmtDayMon(iso); } // "2026-04-20" → "20 Apr"
     function buildRoasChart(buckets, w, h) {
       const data = buckets.slice().reverse(); // oldest → newest
-      const rows = data.map(b => ({ b, be: roasBreakEvenDay(b) })).filter(r => r.be !== undefined);
+      const rows = data.map(b => ({ b, be: roasBreakEven(b) })).filter(r => r.be !== undefined);
       const n = rows.length;
       if (!n) return '<div class="empty-state"><h2>No cohorts</h2><p>No spend in this window.</p></div>';
-      const padL = 44, padR = 14, padT = 18, padB = 30;
-      const iw = w - padL - padR, ih = h - padT - padB;
+      const padL = 44, padR = 14, padT = 14, openBand = 22, padB = 30;
+      const plotTop = padT + openBand;      // plot area starts below the open strip
+      const iw = w - padL - padR, ih = h - plotTop - padB;
 
-      // y scale from paid-back values; headroom + a top "open" band for null
-      const paid = rows.filter(r => r.be !== null && r.be > 0).map(r => r.be);
+      const paid = rows.filter(r => r.be !== null).map(r => r.be.age);
       let maxBE = paid.length ? Math.max(...paid) : 30;
       maxBE = Math.max(30, Math.ceil((maxBE*1.15)/15)*15);
-      const openY = padT;                 // hollow dots pinned near top
       const x = (i) => padL + (n===1 ? iw/2 : (i/(n-1))*iw);
-      const y = (d) => padT + (d/maxBE)*ih; // 0 days at top, more days lower
+      const y = (d) => plotTop + (d/maxBE)*ih; // 0d at plotTop, more days lower
+      const openY = padT + openBand/2;         // "not paid back" strip center
 
+      // open-band separator + label
+      let grid = '<line x1="'+padL+'" y1="'+(plotTop).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+(plotTop).toFixed(1)+'" stroke="#2a2a2a" stroke-dasharray="2 2"/>';
+      grid += '<text x="'+(padL-6)+'" y="'+(openY+3).toFixed(1)+'" fill="#888" font-size="8.5" text-anchor="end">open</text>';
       // y gridlines (days) every 15
-      let grid = "";
       for (let g=0; g<=maxBE; g+=15) {
         grid += '<line x1="'+padL+'" y1="'+y(g).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+y(g).toFixed(1)+'" stroke="#1f1f1f"/>';
         grid += '<text x="'+(padL-6)+'" y="'+(y(g)+3).toFixed(1)+'" fill="#777" font-size="9" text-anchor="end">'+g+'d</text>';
       }
-      grid += '<text x="'+(w-padR)+'" y="'+(openY+3).toFixed(1)+'" fill="#8a8a8a" font-size="9" text-anchor="end">not paid back</text>';
 
-      // trend line through paid-back dots (skip open ones)
+      // trend line through paid-back dots
       const paidPts = [];
-      rows.forEach((r,i) => { if (r.be !== null) paidPts.push([x(i), y(r.be)]); });
+      rows.forEach((r,i) => { if (r.be !== null) paidPts.push([x(i), y(r.be.age)]); });
       let trend = "";
       if (paidPts.length > 1) {
         trend = '<polyline fill="none" stroke="#3a3a3a" stroke-width="1.5" stroke-dasharray="4 3" points="'+paidPts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ")+'"/>';
@@ -1220,16 +1223,16 @@
         const px = x(i);
         let cy, mk, tip;
         if (r.be === null) {
-          cy = openY; mk = '<circle cx="'+px.toFixed(1)+'" cy="'+cy+'" r="4.5" fill="#0f0f0f" stroke="#777" stroke-width="1.5"/>';
+          cy = openY; mk = '<circle cx="'+px.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="4" fill="#0f0f0f" stroke="#777" stroke-width="1.5"/>';
           tip = r.b.label + '\nnot paid back yet (ROAS ' + Math.round(r.b.now||0) + '%)';
         } else {
-          cy = y(r.be);
-          const col = r.be<=30 ? "#4ade80" : r.be<=60 ? "#ef9f27" : "#f0997b";
+          cy = y(r.be.age);
+          const col = r.be.age<=30 ? "#4ade80" : r.be.age<=60 ? "#ef9f27" : "#f0997b";
           mk = '<circle cx="'+px.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="4.5" fill="'+col+'"/>';
-          tip = r.b.label + '\nbroke even at D' + r.be;
+          tip = r.b.label + '\nbroke even ' + fmtISODate(r.be.date) + ' (D' + r.be.age + ')';
         }
         dots += mk;
-        hits += '<rect class="rc-hit" x="'+(px-iw/(2*Math.max(n,1))).toFixed(1)+'" y="'+padT+'" width="'+(iw/Math.max(n,1)).toFixed(1)+'" height="'+ih+'" fill="transparent"><title>'+tip+'</title></rect>';
+        hits += '<rect class="rc-hit" x="'+(px-iw/(2*Math.max(n,1))).toFixed(1)+'" y="'+padT+'" width="'+(iw/Math.max(n,1)).toFixed(1)+'" height="'+(h-padT-padB).toFixed(1)+'" fill="transparent"><title>'+tip+'</title></rect>';
       });
 
       // x labels: first, mid, last
@@ -1299,8 +1302,12 @@
         const spendCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>';
         const procCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.pLife)+'</td>';
         const refCell = !roasShowRefunds ? '' : (b.refunds > 0 ? '<td class="pf-t-num r" style="color:#f87171">-'+fmtMoney(b.refunds)+'</td>' : '<td class="pf-t-num r dim">—</td>');
+        const be = roasBreakEven(b);
+        const beCell = be===undefined ? '<td class="pf-t-num r dim">—</td>'
+          : be===null ? '<td class="pf-t-num r" style="color:#f87171">not yet</td>'
+          : '<td class="pf-t-num r" style="color:#4ade80">'+fmtDayMon(be.date)+' <span style="color:#777">D'+be.age+'</span></td>';
         return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+refCell+
-          roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+'</tr>';
+          roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+beCell+'</tr>';
       }).join("");
 
       const legend = '<div class="ch-legend">' +
@@ -1317,15 +1324,15 @@
         '<span class="ch-lg"><i style="background:#f0997b"></i>&gt;60d</span>' +
         '<span class="ch-lg"><i style="background:#0f0f0f;border:1.5px solid #777"></i>not paid back</span></div>';
       const chart = '<div class="pf-apps" style="margin-bottom:14px">' +
-        '<h3 style="margin:0 0 10px">Days to break even by cohort</h3>' + chartLegend +
+        '<h3 style="margin:0 0 10px">Days to break even by cohort <span style="color:#666;font-weight:400;text-transform:none;letter-spacing:0">· hover for exact date</span></h3>' + chartLegend +
         '<div class="pf-chart-wrap">'+chartSvg+'</div></div>';
 
       const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
       const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
         '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>'+(roasShowRefunds?'<th class="r">Refunds</th>':'') +
-        '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th>' +
+        '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th><th class="r">Break-even</th>' +
         '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
-        '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Refunds subtract from their original cohort. A column shows — until every day in the period has aged past that milestone, or the period has no ad spend.</div></div>';
+        '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Break-even = exact date cumulative proceeds first covered spend (running-summed from per-day events). Refunds subtract from their original cohort.</div></div>';
 
       container.innerHTML = header + tiles + chart + table;
     }

@@ -1316,22 +1316,38 @@ ev AS (
   INNER JOIN anchors a ON e.originalTransactionId = a.otid
   WHERE e.applicationId = ${Number(appId)} AND e.isSandbox = 0
     AND (e.name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') OR e.isRefund = 1)
+),
+byage AS (
+  -- net proceeds per cohort-day per age-day (only non-zero ages kept below)
+  SELECT cohort_day, age, round(sum(net), 2) AS day_net
+  FROM ev GROUP BY cohort_day, age
+),
+milestones AS (
+  SELECT toString(cohort_day) AS day,
+    uniqExact(otid) AS buyers,
+    round(sumIf(net, age <= 0), 2) AS d0,
+    round(sumIf(net, age <= 7), 2) AS d7,
+    round(sumIf(net, age <= 14), 2) AS d14,
+    round(sumIf(net, age <= 30), 2) AS d30,
+    round(sumIf(net, age <= 45), 2) AS d45,
+    round(sumIf(net, age <= 60), 2) AS d60,
+    round(sumIf(net, age <= 90), 2) AS d90,
+    round(sum(net), 2) AS lifetime,
+    round(sumIf(abs(net), isRef = 1), 2) AS refunds
+  FROM ev GROUP BY cohort_day
+),
+curves AS (
+  -- compact per-age net curve: [[age, day_net], ...] sorted by age, zeros dropped.
+  -- Sparse (~8 pts/cohort); the client running-sums it vs bucket spend for the
+  -- exact break-even age.
+  SELECT toString(cohort_day) AS day,
+    arraySort(x -> x.1, groupArray((toInt32(age), day_net))) AS curve
+  FROM byage WHERE day_net != 0 GROUP BY cohort_day
 )
-SELECT toString(cohort_day) AS day,
-  uniqExact(otid) AS buyers,
-  round(sumIf(net, age <= 0), 2) AS d0,
-  round(sumIf(net, age <= 7), 2) AS d7,
-  round(sumIf(net, age <= 14), 2) AS d14,
-  round(sumIf(net, age <= 30), 2) AS d30,
-  round(sumIf(net, age <= 45), 2) AS d45,
-  round(sumIf(net, age <= 60), 2) AS d60,
-  round(sumIf(net, age <= 90), 2) AS d90,
-  round(sum(net), 2) AS lifetime,
-  -- total refunds ($, positive) charged back against this cohort, any age
-  round(sumIf(abs(net), isRef = 1), 2) AS refunds
-FROM ev
-WHERE cohort_day >= today() - ${ROAS_WINDOW_DAYS}
-GROUP BY cohort_day ORDER BY cohort_day DESC
+SELECT m.*, c.curve AS curve
+FROM milestones m LEFT JOIN curves c ON m.day = c.day
+WHERE toDate(m.day) >= today() - ${ROAS_WINDOW_DAYS}
+ORDER BY m.day DESC
 FORMAT JSONEachRow`.trim();
 
   const revRows = await swQuery(sql);
@@ -1376,6 +1392,8 @@ FORMAT JSONEachRow`.trim();
       p90: Number(r.d90) || 0,
       proceeds: Number(r.lifetime) || 0,
       refunds: Number(r.refunds) || 0, // total refunds ($, positive) against this cohort
+      // compact per-age net curve [[age,dayNet],...] for exact break-even calc
+      curve: Array.isArray(r.curve) ? r.curve.map(pt => [Number(pt[0]), Number(pt[1])]) : [],
     };
   });
 
