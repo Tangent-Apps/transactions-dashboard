@@ -1240,7 +1240,7 @@
         const be = roasBreakEven(b);
         const beCell = be===undefined ? '<td class="pf-t-num r dim">—</td>'
           : be===null ? '<td class="pf-t-num r" style="color:#f87171">not yet</td>'
-          : '<td class="pf-t-num r" style="color:#4ade80">'+fmtDayMon(be.date)+' <span style="color:#777">D'+be.age+'</span></td>';
+          : '<td class="pf-t-num r" style="color:#4ade80">D'+be.age+'</td>';
         return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+refCell+
           roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+beCell+'</tr>';
       }).join("");
