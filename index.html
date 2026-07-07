@@ -689,7 +689,7 @@
     // the same doc, zero ClickHouse queries.
     async function loadChurn() {
       const key = churnKey();            // capture — app/plan may change mid-fetch
-      if (churnData[key] || churnInflight[key]) return; // cached or already loading
+      if (churnInflight[key]) return;    // already loading; else always refetch (cheap Firestore read) so new days show without a hard refresh
       churnInflight[key] = true; churnError = null;
       try {
         const snap = await getDoc(doc(db, "churn_cohorts", churnApp + "__" + churnPlan));
@@ -884,7 +884,7 @@
     // Read the doc directly; no Cloud Function / ClickHouse query on page load.
     async function loadRefunds() {
       const key = refundKey();
-      if (refundData[key] || refundInflight[key]) return;
+      if (refundInflight[key]) return;   // always refetch on view; only guard against a concurrent load
       refundInflight[key] = true; refundError = null;
       try {
         const snap = await getDoc(doc(db, "refund_cohorts", refundApp + "__" + refundPlan));
@@ -1067,7 +1067,7 @@
 
     async function loadRoas() {
       const key = roasKey();
-      if (roasData[key] || roasInflight[key]) return;
+      if (roasInflight[key]) return;     // always refetch on view; only guard against a concurrent load
       roasInflight[key] = true; roasError = null;
       try {
         const snap = await getDoc(doc(db, "roas_cohorts", key));
