@@ -935,12 +935,12 @@ SELECT
   toString(toStartOfWeek(s.start_day, 1)) AS cohort_week,
   count() AS cohort_size,
   round(sum(rev.gross), 2) AS cohort_usd,
-  countIf(dateDiff('day',s.start_day,r.refund_day)=0) AS d0_n,
-  countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 1 AND 7) AS d1_7_n,
+  countIf(dateDiff('day',s.start_day,r.refund_day)=1) AS d1_n,
+  countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 2 AND 7) AS d2_7_n,
   countIf(dateDiff('day',s.start_day,r.refund_day) BETWEEN 8 AND 30) AS d8_30_n,
   countIf(dateDiff('day',s.start_day,r.refund_day) > 30) AS d30plus_n,
-  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day)=0), 2) AS d0_usd,
-  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) BETWEEN 1 AND 7), 2) AS d1_7_usd,
+  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day)=1), 2) AS d1_usd,
+  round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) BETWEEN 2 AND 7), 2) AS d2_7_usd,
   round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) BETWEEN 8 AND 30), 2) AS d8_30_usd,
   round(sumIf(r.refund_amt, dateDiff('day',s.start_day,r.refund_day) > 30), 2) AS d30plus_usd
 FROM subs s
@@ -959,8 +959,10 @@ FORMAT JSONEachRow`.trim();
     const ageDays = Math.floor((todayMs - startMs) / 86400000);
     const pctN = (n) => (size > 0 ? Math.round((Number(n) / size) * 1000) / 10 : 0);
     const pctU = (d) => (usd > 0 ? Math.round((Number(d) / usd) * 1000) / 10 : 0);
-    // null a bucket if the cohort hasn't aged past the bucket's window end
-    const gate = (key, val) => (ageDays >= BUCKET_MATURITY_DAYS[key] ? val : null);
+    // null a bucket until the cohort has aged past the bucket's window end.
+    // Refund buckets start at D1 (Apple needs ~24h to process — nothing lands on D0).
+    const REFUND_MATURITY = { d1: 2, d2_7: 8, d8_30: 31, d30plus: 45 };
+    const gate = (key, val) => (ageDays >= REFUND_MATURITY[key] ? val : null);
     return {
       week: r.cohort_week,
       size,
@@ -968,15 +970,15 @@ FORMAT JSONEachRow`.trim();
       ageDays,
       // txn-rate mode (count based)
       txn: {
-        d0: gate("d0", pctN(r.d0_n)),
-        d1_7: gate("d1_7", pctN(r.d1_7_n)),
+        d1: gate("d1", pctN(r.d1_n)),
+        d2_7: gate("d2_7", pctN(r.d2_7_n)),
         d8_30: gate("d8_30", pctN(r.d8_30_n)),
         d30plus: gate("d30plus", pctN(r.d30plus_n)),
       },
       // revenue-rate mode ($ based)
       revenue: {
-        d0: gate("d0", pctU(r.d0_usd)),
-        d1_7: gate("d1_7", pctU(r.d1_7_usd)),
+        d1: gate("d1", pctU(r.d1_usd)),
+        d2_7: gate("d2_7", pctU(r.d2_7_usd)),
         d8_30: gate("d8_30", pctU(r.d8_30_usd)),
         d30plus: gate("d30plus", pctU(r.d30plus_usd)),
       },

@@ -160,6 +160,15 @@
     .pf-t-app { font-weight: 600; color: #e8e8e8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
     .pf-t-num { font-variant-numeric: tabular-nums; color: #fff; font-weight: 600; }
     .pf-t-num.dim { color: #888; font-weight: 500; }
+    /* heatmap cells (churn/refund cohort tables) */
+    .pf-table td.heat { text-align: center; padding: 6px 8px; }
+    .pf-table td.heat .hcell {
+      display: inline-block; min-width: 46px; padding: 4px 8px; border-radius: 6px;
+      font-variant-numeric: tabular-nums; font-weight: 600; line-height: 1.3;
+      transition: background 0.2s ease;
+    }
+    .pf-table td.heat.dim .hcell { color: #5a5a5a; background: transparent !important; font-weight: 500; }
+    .pf-table td.heat-total .hcell { min-width: 52px; }
     .pf-t-spark { vertical-align: middle; width: 130px; }
     .pf-t-spark svg { vertical-align: middle; }
     .pf-t-delta { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -798,11 +807,19 @@
         '<span class="ch-lg"><i style="background:'+b.color+'"></i>'+b.label+'</span>').join("") + '</div>';
       const chart = buildChurnChart(cohorts, 900, 300);
 
+      // dynamic heat scale: max bucket value + max total across visible cohorts (min floor so a flat table still shows contrast)
+      let cellMax = 0, totMax = 0;
+      cohorts.forEach(c => {
+        let t = 0;
+        CHURN_BUCKETS.forEach(b => { const v=c[b.key]; if (v!=null) { if (v>cellMax) cellMax=v; t+=v; } });
+        if (t>totMax) totMax=t;
+      });
+      cellMax = Math.max(cellMax, 5); totMax = Math.max(totMax, 5);
       const rows = cohorts.slice().reverse().map(c => {
         const known = CHURN_BUCKETS.map(b=>c[b.key]).filter(v=>v!=null);
         const total = known.reduce((s,v)=>s+v,0);
-        const cells = CHURN_BUCKETS.map(b => '<td class="pf-t-num r '+(c[b.key]==null?"dim":"")+'">'+(c[b.key]==null?"—":c[b.key].toFixed(1)+"%")+'</td>').join("");
-        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+c.size+'</td>'+cells+'<td class="pf-t-num r">'+total.toFixed(1)+'%</td></tr>';
+        const cells = CHURN_BUCKETS.map(b => heatTd(c[b.key], cellMax)).join("");
+        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+c.size+'</td>'+cells+heatTd(total, totMax, "heat-total")+'</tr>';
       }).join("");
       const table = '<div class="pf-apps"><h3>By cohort week</h3><table class="pf-table"><thead><tr>' +
         '<th>Cohort</th><th class="r">Subs</th>' + CHURN_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total*</th>' +
@@ -857,8 +874,8 @@
       ["32830","GirlWalk"],["22372","GirlTalk"],["35269","Poly AI"],
     ];
     const REFUND_BUCKETS = [
-      { key:"d0",      label:"Day 0",     color:"#f87171" },
-      { key:"d1_7",    label:"Days 1–7",  color:"#fb923c" },
+      { key:"d1",      label:"Day 1",     color:"#f87171" },
+      { key:"d2_7",    label:"Days 2–7",  color:"#fb923c" },
       { key:"d8_30",   label:"Days 8–30", color:"#fbbf24" },
       { key:"d30plus", label:"Day 30+",   color:"#4ade80" },
     ];
@@ -992,12 +1009,19 @@
       const chart = buildRefundChart(cohorts, 900, 300);
 
       const denomHdr = refundMetric === "revenue" ? "Rev" : "Subs";
+      let cellMax = 0, totMax = 0;
+      cohorts.forEach(c => {
+        let t = 0;
+        REFUND_BUCKETS.forEach(b => { const v=rfVal(c,b.key); if (v!=null) { if (v>cellMax) cellMax=v; t+=v; } });
+        if (t>totMax) totMax=t;
+      });
+      cellMax = Math.max(cellMax, 5); totMax = Math.max(totMax, 5);
       const rows = cohorts.slice().reverse().map(c => {
         const known = REFUND_BUCKETS.map(b=>rfVal(c,b.key)).filter(v=>v!=null);
         const total = known.reduce((s,v)=>s+v,0);
         const denom = refundMetric === "revenue" ? ("$"+Math.round(c.usd||0).toLocaleString()) : c.size;
-        const cells = REFUND_BUCKETS.map(b => { const v=rfVal(c,b.key); return '<td class="pf-t-num r '+(v==null?"dim":"")+'">'+(v==null?"—":v.toFixed(1)+"%")+'</td>'; }).join("");
-        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+denom+'</td>'+cells+'<td class="pf-t-num r">'+total.toFixed(1)+'%</td></tr>';
+        const cells = REFUND_BUCKETS.map(b => heatTd(rfVal(c,b.key), cellMax)).join("");
+        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+denom+'</td>'+cells+heatTd(total, totMax, "heat-total")+'</tr>';
       }).join("");
       const table = '<div class="pf-apps"><h3>By cohort week</h3><table class="pf-table"><thead><tr>' +
         '<th>Cohort</th><th class="r">'+denomHdr+'</th>' + REFUND_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total*</th>' +
@@ -1089,6 +1113,27 @@
       if (pct < 70) return "#f87171";
       if (pct < 100) return "#fbbf24";
       return "#4ade80";
+    }
+
+    // Heatmap for churn/refund tables. Higher % = worse (red), lower = better (green).
+    // `t` normalized 0..1 (v / scaleMax). Returns {bg, fg} — translucent tinted bg + readable text.
+    // Green (140°) → amber (48°) → red (0°) hue ramp; alpha scales with intensity so
+    // near-zero cells stay quiet and hot cells pop.
+    function heatColors(t) {
+      t = Math.max(0, Math.min(1, t));
+      // hue: 0% -> 140 (green), 50% -> 48 (amber), 100% -> 2 (red)
+      const hue = t < 0.5 ? 140 - (140 - 48) * (t / 0.5) : 48 - (48 - 2) * ((t - 0.5) / 0.5);
+      const alpha = 0.10 + 0.34 * t;                 // 0.10 quiet -> 0.44 hot
+      const bg = "hsla(" + hue.toFixed(0) + ",72%,50%," + alpha.toFixed(3) + ")";
+      const fg = t > 0.55 ? "#ffe4e0" : t > 0.28 ? "#fde9c8" : "#d6f5df";
+      return { bg: bg, fg: fg };
+    }
+    // Build one heat <td>. v = value (%), scaleMax = table's dynamic max for normalization.
+    function heatTd(v, scaleMax, extraClass) {
+      if (v == null) return '<td class="pf-t-num heat dim r ' + (extraClass || "") + '"><span class="hcell">—</span></td>';
+      const c = heatColors(scaleMax > 0 ? v / scaleMax : 0);
+      return '<td class="pf-t-num heat r ' + (extraClass || "") + '">' +
+        '<span class="hcell" style="background:' + c.bg + ';color:' + c.fg + '">' + v.toFixed(1) + '%</span></td>';
     }
     function roasCell(pct, strong) {
       if (pct == null) return '<td class="pf-t-num r dim">—</td>';
