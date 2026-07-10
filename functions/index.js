@@ -780,6 +780,12 @@ const CHURN_WEEKS = 14; // how many weekly cohorts to return (client windows fur
 // Bucket needs this many days elapsed since cohort start to be "complete".
 // D30+ keeps accruing forever; treat 45d as settled enough to show.
 const BUCKET_MATURITY_DAYS = { d0: 1, d1_7: 8, d8_30: 31, d30plus: 45 };
+// Day count at which a cohort has *entered* a bucket's window (start, not end).
+// Once entered we show the running value even if still accruing; the client
+// styles not-yet-mature buckets as partial. Cohort age is measured from the
+// week's Monday, so the latest signup in the week is up to 6 days younger.
+const CHURN_BUCKET_START = { d0: 0, d1_7: 1, d8_30: 8, d30plus: 30 };
+const REFUND_BUCKET_START = { d1: 1, d2_7: 2, d8_30: 8, d30plus: 30 };
 
 async function fetchChurnCohorts(appId, plan) {
   const appFilter = "applicationId = " + Number(appId);
@@ -823,16 +829,26 @@ FORMAT JSONEachRow`.trim();
     const startMs = Date.parse(r.cohort_week + "T00:00:00Z");
     const ageDays = Math.floor((todayMs - startMs) / 86400000);
     const pct = (n) => (size > 0 ? Math.round((Number(n) / size) * 1000) / 10 : 0);
-    // null a bucket if the cohort hasn't aged past the bucket's window end
-    const gated = (val, key) => (ageDays >= BUCKET_MATURITY_DAYS[key] ? pct(val) : null);
+    // Show a bucket's running value once the cohort has ENTERED its window
+    // (age >= bucket start). Null only before entry — nothing could have landed
+    // there yet. `mature` flags whether the window has fully closed, so the
+    // client can mark still-accruing buckets as partial.
+    const shown = (val, key) => (ageDays >= CHURN_BUCKET_START[key] ? pct(val) : null);
+    const mature = (key) => ageDays >= BUCKET_MATURITY_DAYS[key];
     return {
       week: r.cohort_week,
       size,
       ageDays,
-      d0: gated(r.d0, "d0"),
-      d1_7: gated(r.d1_7, "d1_7"),
-      d8_30: gated(r.d8_30, "d8_30"),
-      d30plus: gated(r.d30plus, "d30plus"),
+      d0: shown(r.d0, "d0"),
+      d1_7: shown(r.d1_7, "d1_7"),
+      d8_30: shown(r.d8_30, "d8_30"),
+      d30plus: shown(r.d30plus, "d30plus"),
+      mature: {
+        d0: mature("d0"),
+        d1_7: mature("d1_7"),
+        d8_30: mature("d8_30"),
+        d30plus: mature("d30plus"),
+      },
     };
   });
   return { appId: Number(appId), plan: plan || "all", cohorts, generatedAt: new Date().toISOString() };
@@ -959,10 +975,12 @@ FORMAT JSONEachRow`.trim();
     const ageDays = Math.floor((todayMs - startMs) / 86400000);
     const pctN = (n) => (size > 0 ? Math.round((Number(n) / size) * 1000) / 10 : 0);
     const pctU = (d) => (usd > 0 ? Math.round((Number(d) / usd) * 1000) / 10 : 0);
-    // null a bucket until the cohort has aged past the bucket's window end.
     // Refund buckets start at D1 (Apple needs ~24h to process — nothing lands on D0).
+    // Show a bucket's running value once the cohort has ENTERED its window; null
+    // only before entry. `mature` flags whether the window has fully closed.
     const REFUND_MATURITY = { d1: 2, d2_7: 8, d8_30: 31, d30plus: 45 };
-    const gate = (key, val) => (ageDays >= REFUND_MATURITY[key] ? val : null);
+    const shown = (key, val) => (ageDays >= REFUND_BUCKET_START[key] ? val : null);
+    const mature = (key) => ageDays >= REFUND_MATURITY[key];
     return {
       week: r.cohort_week,
       size,
@@ -970,17 +988,23 @@ FORMAT JSONEachRow`.trim();
       ageDays,
       // txn-rate mode (count based)
       txn: {
-        d1: gate("d1", pctN(r.d1_n)),
-        d2_7: gate("d2_7", pctN(r.d2_7_n)),
-        d8_30: gate("d8_30", pctN(r.d8_30_n)),
-        d30plus: gate("d30plus", pctN(r.d30plus_n)),
+        d1: shown("d1", pctN(r.d1_n)),
+        d2_7: shown("d2_7", pctN(r.d2_7_n)),
+        d8_30: shown("d8_30", pctN(r.d8_30_n)),
+        d30plus: shown("d30plus", pctN(r.d30plus_n)),
       },
       // revenue-rate mode ($ based)
       revenue: {
-        d1: gate("d1", pctU(r.d1_usd)),
-        d2_7: gate("d2_7", pctU(r.d2_7_usd)),
-        d8_30: gate("d8_30", pctU(r.d8_30_usd)),
-        d30plus: gate("d30plus", pctU(r.d30plus_usd)),
+        d1: shown("d1", pctU(r.d1_usd)),
+        d2_7: shown("d2_7", pctU(r.d2_7_usd)),
+        d8_30: shown("d8_30", pctU(r.d8_30_usd)),
+        d30plus: shown("d30plus", pctU(r.d30plus_usd)),
+      },
+      mature: {
+        d1: mature("d1"),
+        d2_7: mature("d2_7"),
+        d8_30: mature("d8_30"),
+        d30plus: mature("d30plus"),
       },
     };
   });

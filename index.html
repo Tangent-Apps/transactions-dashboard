@@ -169,6 +169,9 @@
     }
     .pf-table td.heat.dim .hcell { color: #5a5a5a; background: transparent !important; font-weight: 500; }
     .pf-table td.heat-total .hcell { min-width: 52px; }
+    /* partial = window entered but not yet fully matured; value is still accruing */
+    .pf-table td.heat.partial .hcell { opacity: 0.72; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14); }
+    .pf-table td.heat.partial .hcell::before { content: "~"; opacity: 0.6; margin-right: 1px; }
     .pf-t-spark { vertical-align: middle; width: 130px; }
     .pf-t-spark svg { vertical-align: middle; }
     .pf-t-delta { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -816,15 +819,18 @@
       });
       cellMax = Math.max(cellMax, 5); totMax = Math.max(totMax, 5);
       const rows = cohorts.slice().reverse().map(c => {
+        const mat = c.mature || {};
         const known = CHURN_BUCKETS.map(b=>c[b.key]).filter(v=>v!=null);
         const total = known.reduce((s,v)=>s+v,0);
-        const cells = CHURN_BUCKETS.map(b => heatTd(c[b.key], cellMax)).join("");
-        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+c.size+'</td>'+cells+heatTd(total, totMax, "heat-total")+'</tr>';
+        // total is partial if any shown bucket hasn't matured yet
+        const totPartial = CHURN_BUCKETS.some(b => c[b.key]!=null && mat[b.key]===false);
+        const cells = CHURN_BUCKETS.map(b => heatTd(c[b.key], cellMax, "", mat[b.key]===false)).join("");
+        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+c.size+'</td>'+cells+heatTd(total, totMax, "heat-total", totPartial)+'</tr>';
       }).join("");
       const table = '<div class="pf-apps"><h3>By cohort week</h3><table class="pf-table"><thead><tr>' +
-        '<th>Cohort</th><th class="r">Subs</th>' + CHURN_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total*</th>' +
+        '<th>Cohort</th><th class="r">Subs</th>' + CHURN_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total</th>' +
         '</tr></thead><tbody>'+rows+'</tbody></table>' +
-        '<div class="ch-foot">*Total sums only matured buckets — recent cohorts understate until they age. Cohort = subscription start week; cancellations counted gross (auto-renew turned off).</div></div>';
+        '<div class="ch-foot"><b>~</b> = still accruing (cohort hasn\'t fully aged through that window; number will rise). Cohort = subscription start week; cancellations counted gross (auto-renew turned off).</div></div>';
 
       container.innerHTML = header + legend + '<div class="pf-chart-wrap" id="chChartWrap">'+chart+'<div class="pf-tip" id="chTip"></div></div>' + table;
 
@@ -1017,16 +1023,18 @@
       });
       cellMax = Math.max(cellMax, 5); totMax = Math.max(totMax, 5);
       const rows = cohorts.slice().reverse().map(c => {
+        const mat = c.mature || {};
         const known = REFUND_BUCKETS.map(b=>rfVal(c,b.key)).filter(v=>v!=null);
         const total = known.reduce((s,v)=>s+v,0);
         const denom = refundMetric === "revenue" ? ("$"+Math.round(c.usd||0).toLocaleString()) : c.size;
-        const cells = REFUND_BUCKETS.map(b => heatTd(rfVal(c,b.key), cellMax)).join("");
-        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+denom+'</td>'+cells+heatTd(total, totMax, "heat-total")+'</tr>';
+        const totPartial = REFUND_BUCKETS.some(b => rfVal(c,b.key)!=null && mat[b.key]===false);
+        const cells = REFUND_BUCKETS.map(b => heatTd(rfVal(c,b.key), cellMax, "", mat[b.key]===false)).join("");
+        return '<tr><td class="pf-t-app">'+c.week+'</td><td class="pf-t-num r dim">'+denom+'</td>'+cells+heatTd(total, totMax, "heat-total", totPartial)+'</tr>';
       }).join("");
       const table = '<div class="pf-apps"><h3>By cohort week</h3><table class="pf-table"><thead><tr>' +
-        '<th>Cohort</th><th class="r">'+denomHdr+'</th>' + REFUND_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total*</th>' +
+        '<th>Cohort</th><th class="r">'+denomHdr+'</th>' + REFUND_BUCKETS.map(b=>'<th class="r">'+b.label+'</th>').join("") + '<th class="r">Total</th>' +
         '</tr></thead><tbody>'+rows+'</tbody></table>' +
-        '<div class="ch-foot">*Total sums only matured buckets — recent cohorts understate until they age. Cohort = subscription start week; refunds counted first per subscription (isRefund).</div></div>';
+        '<div class="ch-foot"><b>~</b> = still accruing (cohort hasn\'t fully aged through that window; number will rise). Cohort = subscription start week; refunds counted first per subscription (isRefund).</div></div>';
 
       container.innerHTML = header + legend + '<div class="pf-chart-wrap" id="rfChartWrap">'+chart+'<div class="pf-tip" id="rfTip"></div></div>' + table;
 
@@ -1129,10 +1137,13 @@
       return { bg: bg, fg: fg };
     }
     // Build one heat <td>. v = value (%), scaleMax = table's dynamic max for normalization.
-    function heatTd(v, scaleMax, extraClass) {
+    // partial = window entered but not fully matured -> value shown but styled as still-accruing.
+    function heatTd(v, scaleMax, extraClass, partial) {
       if (v == null) return '<td class="pf-t-num heat dim r ' + (extraClass || "") + '"><span class="hcell">—</span></td>';
       const c = heatColors(scaleMax > 0 ? v / scaleMax : 0);
-      return '<td class="pf-t-num heat r ' + (extraClass || "") + '">' +
+      const cls = "pf-t-num heat r " + (extraClass || "") + (partial ? " partial" : "");
+      const tip = partial ? ' title="Still accruing — this cohort hasn\'t fully aged through this window yet"' : "";
+      return '<td class="' + cls + '"' + tip + '>' +
         '<span class="hcell" style="background:' + c.bg + ';color:' + c.fg + '">' + v.toFixed(1) + '%</span></td>';
     }
     function roasCell(pct, strong) {
