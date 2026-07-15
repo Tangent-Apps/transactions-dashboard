@@ -767,12 +767,22 @@ functions.http("userLifetime", async (req, res) => {
   }
 });
 
-// ---- Cancellation cohorts ----
+// ---- Churn (lost-user) cohorts ----
 // Weekly cohorts by subscription start (initial_purchase.purchasedAt), per app.
-// Cancels (gross 'cancellation' events, first per otid) bucketed by age from start:
+// A sub is counted as LOST when a user signals INTENT to leave and does NOT
+// recover. We track the intent moment, not the mechanical end of the sub:
+//   cancellation  = explicit intent (auto-renew turned off; annual subs still
+//                   pay until period end, but the decision is made — flag it)
+//   billing_issue = implicit intent (payment failing / in retry — stopped paying)
+// `expiration` is NOT counted: it's the lagged consequence of the above (a
+// weekly unsub at D0 expires ~D7), so counting it would add lag + double-count.
+// We take the EARLIEST intent signal per originalTransactionId, then NET OUT
+// recoveries: if a paid `renewal` lands AFTER that signal, the user came back
+// (billing retry succeeded / re-subscribed) and is NOT counted as lost.
+// The surviving lost users are bucketed by the leave-signal's age from start:
 // D0 / D1-7 / D8-30 / D30+. Each bucket = % of the cohort. Denominator = subs
-// started that week. Immature buckets are nulled per cohort (see maturity gates)
-// so young cohorts don't read artificially low.
+// started that week. Immature buckets are marked partial per cohort (see gates)
+// so young cohorts read as still-accruing rather than artificially low.
 const churnCache = new Map(); // key = appId, value = { ts, data }
 const CHURN_CACHE_TTL_MS = 30 * 60 * 1000;
 const CHURN_WEEKS = 14; // how many weekly cohorts to return (client windows further)
@@ -803,21 +813,45 @@ WITH subs AS (
   GROUP BY otid
   ${planHaving}
 ),
-cancels AS (
-  SELECT originalTransactionId AS otid, min(toDate(ts)) AS cancel_day
+leaves AS (
+  -- Earliest INTENT-to-leave signal per sub. We measure when a user decides to
+  -- go, not when the sub mechanically ends:
+  --   cancellation  = explicit intent (turned off auto-renew)
+  --   billing_issue = implicit intent (stopped paying; payment failing)
+  -- 'expiration' is deliberately EXCLUDED: it is the delayed consequence of the
+  -- above (a weekly unsub at D0 expires ~D7) and would add lag + double-count.
+  SELECT originalTransactionId AS otid,
+    min(toDateTime(ts)) AS leave_ts, min(toDate(ts)) AS leave_day
   FROM open_revenue.attributed_events_by_ts_rep
-  WHERE ${appFilter} AND isSandbox=0 AND name='cancellation' AND originalTransactionId!=''
+  WHERE ${appFilter} AND isSandbox=0 AND originalTransactionId!=''
+    AND name IN ('cancellation','billing_issue')
   GROUP BY otid
+),
+paid_renewals AS (
+  -- Last paid renewal per sub (positive-price renewal = money actually taken).
+  -- Used to net out recoveries: a renewal AFTER the leave signal = came back.
+  SELECT originalTransactionId AS otid, max(toDateTime(ts)) AS last_renewal_ts
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE ${appFilter} AND isSandbox=0 AND originalTransactionId!=''
+    AND name='renewal' AND isRefund=0 AND price>0
+  GROUP BY otid
+),
+lost AS (
+  -- A sub is lost only if it has a leave signal with NO paid renewal after it.
+  SELECT l.otid AS otid, l.leave_day AS leave_day
+  FROM leaves l
+  LEFT JOIN paid_renewals pr ON l.otid = pr.otid
+  WHERE pr.last_renewal_ts IS NULL OR pr.last_renewal_ts <= l.leave_ts
 )
 SELECT
   toString(toStartOfWeek(s.start_day, 1)) AS cohort_week,
   count() AS cohort_size,
-  countIf(dateDiff('day',s.start_day,c.cancel_day)=0) AS d0,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 1 AND 7) AS d1_7,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) BETWEEN 8 AND 30) AS d8_30,
-  countIf(dateDiff('day',s.start_day,c.cancel_day) > 30) AS d30plus
+  countIf(dateDiff('day',s.start_day,x.leave_day)=0) AS d0,
+  countIf(dateDiff('day',s.start_day,x.leave_day) BETWEEN 1 AND 7) AS d1_7,
+  countIf(dateDiff('day',s.start_day,x.leave_day) BETWEEN 8 AND 30) AS d8_30,
+  countIf(dateDiff('day',s.start_day,x.leave_day) > 30) AS d30plus
 FROM subs s
-LEFT JOIN cancels c ON s.otid = c.otid
+LEFT JOIN lost x ON s.otid = x.otid
 WHERE s.start_day >= today() - ${CHURN_WEEKS * 7}
 GROUP BY cohort_week ORDER BY cohort_week ASC
 FORMAT JSONEachRow`.trim();
