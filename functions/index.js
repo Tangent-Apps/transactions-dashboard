@@ -1354,8 +1354,12 @@ async function fetchRoasCohorts(appId, geo) {
 
   const sql = `
 WITH anchors AS (
+  -- Cohort day = INSTALL day (not first-payment day). Anchoring on install attributes revenue to
+  -- the acquisition cohort — the right basis for ROAS/UA. installDate is a materialized column on
+  -- each event; take the earliest seen per subscription. Fall back to first paid-event day if a
+  -- subscription somehow has no installDate, so no cohort is dropped.
   SELECT originalTransactionId AS otid,
-    toDate(toTimeZone(min(purchasedAt), '${ROAS_TZ}')) AS cohort_day
+    toDate(toTimeZone(coalesce(min(installDate), min(purchasedAt)), '${ROAS_TZ}')) AS cohort_day
   FROM open_revenue.attributed_events_by_ts_rep
   WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
     AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
