@@ -1303,7 +1303,7 @@
       for (const [key, rs] of groups) {
         let base=0, low=0, high=0, annualRenew=0, actual=0, spend=0, hasSpend=false,
             weekly_p=0, annual_p=0, weekly_subs=0, weekly_alive=0, annual_subs=0, annual_on=0,
-            sumLiftW=0, wSum=0, sumPriceW=0;
+            sumLiftW=0, wSum=0, sumPriceW=0, pMin=Infinity, pMax=0, anyOwnPrice=false;
         for (const r of rs) {
           const lo=proasProjectDay(r,"low",wkMean), ba=proasProjectDay(r,"base",wkMean), hi=proasProjectDay(r,"high",wkMean);
           base+=ba.proj; low+=lo.proj; high+=hi.proj; annualRenew+=ba.annualRenew; actual+=ba.actual;
@@ -1312,11 +1312,15 @@
           annual_subs+=r.annual_subs||0; annual_on+=r.annual_on||0;
           sumLiftW+=ba.lift*(r.weekly_alive||0); wSum+=(r.weekly_alive||0);
           const price=(r.wk_price>0?r.wk_price:(wkMean>0?wkMean:0)); sumPriceW+=price*(r.weekly_alive||0);
+          if (r.wk_price>0) anyOwnPrice=true;
+          if (r.wk_price_min>0) pMin=Math.min(pMin, r.wk_price_min);
+          if (r.wk_price_max>0) pMax=Math.max(pMax, r.wk_price_max);
           if (r.spend!=null){ spend+=r.spend; hasSpend=true; }
         }
         out.set(key, {
           rs, spend, hasSpend, proj1y:base, projLow:low, projHigh:high, annualRenew, actual,
           weekly_p, annual_p, weekly_subs, weekly_alive, annual_subs, annual_on,
+          anyOwnPrice, wkPriceMin: pMin===Infinity?0:pMin, wkPriceMax: pMax,
           avgLift: wSum>0?sumLiftW/wSum:1.0, wkPrice: wSum>0?sumPriceW/wSum:(wkMean||0),
           weeklyTail: base-actual-annualRenew, annualRate: annual_p>0?annualRenew/annual_p:0,
           // projected cumulative ROAS % at a milestone age (sum each cohort-day's cum-to-age / spend)
@@ -1447,7 +1451,8 @@
           '<h4 style="margin-top:16px">Subscriber base</h4>'+
           '<div class="rc-drow"><span class="k">Annual subs</span><b>'+p.annual_subs+' <span class="dim" style="font-weight:400">('+onPct+'% still on)</span></b></div>'+
           '<div class="rc-drow"><span class="k">Weekly subs</span><b>'+p.weekly_subs+' <span class="dim" style="font-weight:400">('+aliveP+'% still paying)</span></b></div>'+
-          '<div class="rc-drow"><span class="k">Weekly price</span><b>'+(p.wkPrice>0?money(p.wkPrice):"—")+'</b></div>'+
+          '<div class="rc-drow"><span class="k">Weekly price'+(!p.anyOwnPrice&&p.wkPrice>0?' <span class="dim" style="font-weight:400">(app avg)</span>':'')+'</span><b>'+
+            (p.wkPrice>0?'$'+p.wkPrice.toFixed(2)+(p.wkPriceMax>p.wkPriceMin+0.01?' <span class="dim" style="font-weight:400">('+money(p.wkPriceMin)+'–'+money(p.wkPriceMax)+')</span>':''):"—")+'</b></div>'+
           '<div class="rc-drow"><span class="k">Retention lift vs curve</span><b>'+p.avgLift.toFixed(2)+'×</b></div>'+
           '<div class="rc-note">Dashed milestones (·p) are projected — no cohort has reached that age yet. Annual = '+aShare+'% of proceeds; renewal is modeled from auto-renew-off intent (no annual cohort has hit its 1-yr renewal).</div>'+
         '</div></div></div>';

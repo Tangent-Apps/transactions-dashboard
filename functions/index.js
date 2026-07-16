@@ -1607,19 +1607,20 @@ proceeds AS (
   GROUP BY otid
 ),
 wprice AS (
-  -- Per-subscription recurring PRICE = the sub's FIRST positive-price paid event. We sell several
-  -- weekly plans at different prices (weekly.6 ~\$5.1, weekly.9 ~\$7.6, ...), so a cohort's future
-  -- renewals must be priced from the plan THAT cohort actually bought, not a blended average. There
-  -- is no trial anymore, so for post-trial cohorts the initial_purchase price IS the renewal price;
-  -- for legacy trial-era cohorts the first positive charge is the day-3 trial conversion (labelled
-  -- 'renewal'), which is likewise their true recurring price. argMin by purchasedAt captures both.
-  -- One row per otid. Aggregated per cohort below to that cohort's mean price.
+  -- Per-subscription WEEKLY recurring price = the sub's FIRST positive-price WEEKLY charge. We sell
+  -- several weekly plans at different prices (weekly.6 ~\$5.1, weekly.9 ~\$7.6, ...), so a cohort's
+  -- future renewals must be priced from the plan THAT cohort actually bought, not a blended average.
+  -- No trial anymore, so for post-trial subs the initial_purchase price IS the renewal price; for
+  -- legacy trial-era subs the first positive charge is the day-3 trial conversion (labelled
+  -- 'renewal'), likewise their true recurring price. argMin by purchasedAt captures both.
+  -- productId must match weekly: a sub that started weekly then switched to annual (or a Stripe/web
+  -- product with a different price format) must NOT contaminate the weekly price. One row per otid.
   SELECT originalTransactionId AS otid,
     argMin(toFloat64(proceeds), purchasedAt) AS first_price
   FROM open_revenue.attributed_events_by_ts_rep
   WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
     AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
-    AND isRefund = 0 AND toFloat64(proceeds) > 0
+    AND isRefund = 0 AND toFloat64(proceeds) > 0 AND productId ILIKE '%week%'
   GROUP BY otid
 )
 SELECT toString(a.cohort_day) AS day,
@@ -1635,11 +1636,14 @@ SELECT toString(a.cohort_day) AS day,
   countIf(a.plan = 'annual' AND u.otid = '') AS annual_on,
   round(sumIf(pr.net, a.plan = 'weekly'), 2) AS weekly_p,
   round(sumIf(pr.net, a.plan = 'annual'), 2) AS annual_p,
-  -- this cohort's mean weekly recurring price (from each weekly sub's first positive charge).
-  -- Prices future renewals with the plan the cohort actually bought. Known from day 0 for every
-  -- sub (no trial dependency), so it's populated even for brand-new cohorts.
-  countIf(a.plan = 'weekly' AND wp.first_price > 0) AS wk_price_n,
-  round(avgIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0), 3) AS wk_renew_price
+  -- this cohort's weekly renewal price, averaged over the STILL-ALIVE weekly subs (they're the ones
+  -- whose renewals we project, and higher-price plans retain better, so alive-only is more accurate
+  -- than all-subs). Plus the min/max weekly price in the cohort for an honest display range. Priced
+  -- from each sub's own weekly first-charge, so the per-plan spread is preserved, not blended away.
+  countIf(a.plan = 'weekly' AND wp.first_price > 0 AND (s.last_loss = toDateTime64(0,6,'UTC') OR s.last_paid > s.last_loss OR s.max_exp > now())) AS wk_price_n,
+  round(avgIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0 AND (s.last_loss = toDateTime64(0,6,'UTC') OR s.last_paid > s.last_loss OR s.max_exp > now())), 3) AS wk_renew_price,
+  round(minIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0), 2) AS wk_price_min,
+  round(maxIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0), 2) AS wk_price_max
 FROM anchors a
 LEFT JOIN state s ON a.otid = s.otid
 LEFT JOIN unsub u ON a.otid = u.otid
@@ -1681,8 +1685,10 @@ FORMAT JSONEachRow`.trim();
       weekly_alive: Number(r.weekly_alive) || 0,
       annual_subs: Number(r.annual_subs) || 0,
       annual_on: Number(r.annual_on) || 0,
-      wk_price: Number(r.wk_renew_price) || 0,   // this cohort's mean weekly recurring price (from D0 / first charge)
+      wk_price: Number(r.wk_renew_price) || 0,   // alive-weighted mean weekly recurring price (0 = none alive)
       wk_price_n: Number(r.wk_price_n) || 0,
+      wk_price_min: Number(r.wk_price_min) || 0, // cohort's weekly price spread, for display
+      wk_price_max: Number(r.wk_price_max) || 0,
     };
   });
 
