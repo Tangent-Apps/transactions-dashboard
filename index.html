@@ -234,6 +234,7 @@
       <button class="section-btn" id="sectionChurn" onclick="setSection('churn')">Churn</button>
       <button class="section-btn" id="sectionRefunds" onclick="setSection('refunds')">Refunds</button>
       <button class="section-btn" id="sectionRoas" onclick="setSection('roas')">ROAS</button>
+      <button class="section-btn" id="sectionProas" onclick="setSection('proas')">pROAS</button>
     </nav>
   </div>
 
@@ -408,6 +409,7 @@
       document.getElementById("sectionChurn").className = "section-btn" + (sec === "churn" ? " active" : "");
       document.getElementById("sectionRefunds").className = "section-btn" + (sec === "refunds" ? " active" : "");
       document.getElementById("sectionRoas").className = "section-btn" + (sec === "roas" ? " active" : "");
+      document.getElementById("sectionProas").className = "section-btn" + (sec === "proas" ? " active" : "");
       // Activity-only controls hide off Activity via visibility (keeps the grid
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
@@ -415,6 +417,7 @@
       if (sec === "churn") { renderChurn(); loadChurn(); return; }
       if (sec === "refunds") { renderRefunds(); loadRefunds(); return; }
       if (sec === "roas") { renderRoas(); loadRoas(); return; }
+      if (sec === "proas") { renderProas(); loadProas(); return; }
       renderAll();
     };
 
@@ -1315,6 +1318,168 @@
         '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Break-even = exact date cumulative proceeds first covered spend (running-summed from per-day events). Refunds subtract from their original cohort.</div></div>';
 
       container.innerHTML = header + tiles + table;
+    }
+
+    // ========================= pROAS (projection) tab =========================
+    // Consumes proas_cohorts docs (install-day cohorts, plan split + sub counts + churn signals),
+    // reuses roasBucket for the same day/week/month grain, and projects each cohort's revenue to
+    // 1 year: observed proceeds + weekly renewal tail (survival curve) + annual renewal (auto-renew
+    // -off intent × 20% billing). Observed ROAS here == ROAS tab (same net proceeds). Model is
+    // client-side so it can be tuned without redeploying.
+    const PROAS_APPS = ROAS_APPS, PROAS_GEOS = ROAS_GEOS, PROAS_RANGES = ROAS_RANGES;
+    let proasApp = "32830", proasGeo = "all", proasRange = 0, proasGran = "week";
+    let proasData = {}, proasInflight = {}, proasError = null, proasSelected = null;
+    function proasKey() { return proasApp + "__" + proasGeo; }
+    window.setProasApp = function(id){ proasApp=id; proasSelected=null; renderProas(); loadProas(); };
+    window.setProasGeo = function(g){ proasGeo=g; proasSelected=null; renderProas(); loadProas(); };
+    window.setProasGran = function(g){ proasGran=g; proasSelected=null; renderProas(); };
+    window.selectProas = function(k){ proasSelected=k; renderProas(); };
+
+    async function loadProas(){
+      const key = proasKey();
+      if (proasInflight[key]) return;
+      proasInflight[key] = true; proasError = null;
+      try {
+        const snap = await getDoc(doc(db, "proas_cohorts", key));
+        if (!snap.exists()) throw new Error("no pROAS data yet for this app/geo");
+        proasData[key] = JSON.parse(snap.data().payload);
+      } catch(e){ console.warn("proas load failed", e); proasError = e.message; }
+      finally { delete proasInflight[key]; if (section==="proas") renderProas(); }
+    }
+
+    // --- projection model (from the pROAS analysis; GirlWalk-calibrated) ---
+    const WK_SURVIVAL = [1.000,0.554,0.401,0.323,0.248,0.222,0.196,0.166,0.135,0.118,0.100,0.096,
+      0.092,0.092,0.092,0.092,0.092,0.084,0.075,0.067,0.059,0.057,0.055,0.053,0.051,0.049,0.047,0.045,
+      0.043,0.042,0.041,0.040,0.039,0.038,0.037,0.036,0.035,0.034,0.033,0.032,0.031,0.030,0.029,0.028,
+      0.028,0.028,0.028,0.028,0.028,0.028,0.028,0.028,0.028];
+    const WK_HORIZON = 52, WK_PRICE = 6.32, WK_BASE_WK1 = 0.554;
+    const ANNUAL_UNSUB = (()=>{ const real={0:.662,1:.683,2:.710,4:.736,6:.763,8:.762,12:.782,16:.820,20:.894};
+      const a=[]; const ks=Object.keys(real).map(Number);
+      for(let w=0;w<=52;w++){ if(real[w]!=null){a[w]=real[w];continue;}
+        if(w<20){const lo=Math.max(...ks.filter(k=>k<w)),hi=Math.min(...ks.filter(k=>k>w));a[w]=real[lo]+(real[hi]-real[lo])*(w-lo)/(hi-lo);}
+        else a[w]=a[w-1]+(0.95-a[w-1])*0.04; } return a; })();
+    const ANNUAL_UNSUB_WK52 = ANNUAL_UNSUB[52], BILLING_DISCOUNT = 0.20;
+
+    // Aggregate proas rows into buckets (reuse roasBucket for identical grain), summing the
+    // projection inputs. Then project each bucket to 1 year.
+    function proasAggregate(rows, gran){
+      const m = new Map();
+      for (const r of rows){
+        const b = roasBucket(r.day, gran);
+        let a = m.get(b.key);
+        if(!a){ a={ key:b.key, label:b.label, spend:0, hasSpend:false, weekly_p:0, annual_p:0,
+          weekly_subs:0, weekly_alive:0, annual_subs:0, annual_on:0, minAge:Infinity, sumAgeWk:0, nDays:0 }; m.set(b.key,a); }
+        a.weekly_p += r.weekly_p||0; a.annual_p += r.annual_p||0;
+        a.weekly_subs += r.weekly_subs||0; a.weekly_alive += r.weekly_alive||0;
+        a.annual_subs += r.annual_subs||0; a.annual_on += r.annual_on||0;
+        a.minAge = Math.min(a.minAge, r.ageDays); a.sumAgeWk += r.ageDays/7; a.nDays++;
+        if (r.spend != null){ a.spend += r.spend; a.hasSpend = true; }
+      }
+      const out=[...m.values()].sort((x,y)=>x.key<y.key?1:-1);
+      for(const a of out) projectBucket(a);
+      return out;
+    }
+
+    // Project one bucket to a 1-year value + weekly cumulative-ROAS series.
+    function projectBucket(a){
+      const actual = a.weekly_p + a.annual_p;
+      const ageWk = Math.max(0, Math.round(a.minAge/7)); // representative age = youngest cohort day
+      // Weekly retention lift is kept neutral (1.0) here: the proas doc emits alive-now share, not a
+      // clean week-1 retention read, so we don't infer a lift server-side. The base survival curve
+      // applies. (Future: emit per-cohort wk1 survival to enable the product-update lift.)
+      const lift = 1.0;
+      const sNow = WK_SURVIVAL[Math.min(ageWk, WK_HORIZON)] || 0.028;
+      // build weekly incremental series
+      const inc = new Array(WK_HORIZON+1).fill(0);
+      inc[0] += a.annual_p;
+      const obsCap = Math.min(ageWk, WK_HORIZON), nB = obsCap+1;
+      for(let w=0; w<=obsCap; w++) inc[w] += a.weekly_p/nB;
+      if (a.weekly_alive>0 && sNow>0){
+        for(let w=ageWk+1; w<=WK_HORIZON; w++){
+          const fFwd = Math.pow(Math.min(1,(WK_SURVIVAL[w]||0)/sNow), 1/lift);
+          inc[w] += a.weekly_alive * WK_PRICE * fFwd;
+        }
+      }
+      // annual renewal rate: (1 - projected unsub@wk52) × (1 - billing). anchor-and-scale on observed.
+      const aw = Math.min(52, Math.max(1, ageWk));
+      const obsUnsub = a.annual_subs>0 ? 1 - (a.annual_on/a.annual_subs) : null;
+      const pooledNow = ANNUAL_UNSUB[aw] || ANNUAL_UNSUB_WK52;
+      let ratio = 1.0;
+      if (obsUnsub != null && pooledNow>0 && aw>=4) ratio = Math.max(0.85, Math.min(1.1, obsUnsub/pooledNow));
+      const unsub52 = Math.min(0.97, ANNUAL_UNSUB_WK52 * ratio);
+      const annualRate = Math.max(0, (1-unsub52)*(1-BILLING_DISCOUNT));
+      const annualRenew = a.annual_p * annualRate;
+      inc[WK_HORIZON] += annualRenew;
+
+      let run=0; const cum=[];
+      for(let w=0;w<=WK_HORIZON;w++){ run+=inc[w]; cum.push(run); }
+      let splitWk = Math.min(WK_HORIZON, ageWk);
+      while (splitWk<WK_HORIZON && cum[splitWk] < actual-1) splitWk++;
+
+      a.actual = actual;
+      a.projBase = cum[WK_HORIZON];
+      a.weeklyTail = cum[WK_HORIZON] - actual - annualRenew;
+      a.annualRenew = annualRenew;
+      a.annualRate = annualRate;
+      a.cum = cum; a.splitWk = splitWk;
+      a.roasNow = a.hasSpend && a.spend>0 ? actual/a.spend : null;
+      a.pRoas = a.hasSpend && a.spend>0 ? a.projBase/a.spend : null;
+    }
+    function pRoasColorPct(r){ return r==null?"":roasColor(r*100); }
+
+    function renderProas(){
+      const container = document.getElementById("container");
+      const appBtns = PROAS_APPS.map(([id,name]) => '<button class="filter-btn '+(id===proasApp?"active":"")+'" onclick="setProasApp(\''+id+'\')">'+name+'</button>').join("");
+      const geoBtns = PROAS_GEOS.map(([g,name]) => '<button class="pf-range-btn '+(g===proasGeo?"active":"")+'" onclick="setProasGeo(\''+g+'\')">'+name+'</button>').join("");
+      const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) => '<button class="pf-range-btn '+(g===proasGran?"active":"")+'" onclick="setProasGran(\''+g+'\')">'+name+'</button>').join("");
+      const d = proasData[proasKey()];
+      const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
+      const header = '<div class="pf-head"><div><div class="pf-m-label">pROAS · projected to 1 year</div>'+
+        (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>'+
+        '<div class="ch-filters"><div class="pf-ranges">'+geoBtns+'</div><div class="pf-ranges">'+granBtns+'</div></div></div>'+
+        '<div class="ch-appbar">'+appBtns+'</div>';
+
+      if (!d && proasInflight[proasKey()]) { container.innerHTML = header + '<div class="loading">Loading pROAS…</div>'; return; }
+      if (proasError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load pROAS</h2><p>'+proasError+'</p></div>'; return; }
+      if (!d) { container.innerHTML = header + '<div class="loading">Loading pROAS…</div>'; return; }
+
+      const buckets = proasAggregate(d.rows||[], proasGran);
+      const periodCol = proasGran==="month"?"Month":proasGran==="week"?"Week":"Install day";
+      const bodyRows = buckets.map(b => {
+        const sel = b.key===proasSelected ? ' style="background:#12352c"' : '';
+        return '<tr onclick="selectProas(\''+b.key+'\')" style="cursor:pointer"'+sel+'>'+
+          '<td class="pf-t-app">'+b.label+'</td>'+
+          '<td class="pf-t-num r">'+fmtMoney(b.actual)+'</td>'+
+          '<td class="pf-t-num r">'+fmtMoney(b.projBase)+'</td>'+
+          '<td class="pf-t-num r">'+(b.hasSpend?fmtMoney(b.spend):'<span class="dim">—</span>')+'</td>'+
+          roasCell(b.roasNow!=null?b.roasNow*100:null)+
+          roasCell(b.pRoas!=null?b.pRoas*100:null,true)+'</tr>';
+      }).join("");
+      const table = '<div class="pf-apps"><h3>By '+(proasGran==="day"?"install day":proasGran)+' · install cohort</h3><table class="pf-table"><thead><tr>'+
+        '<th>'+periodCol+'</th><th class="r">Proceeds</th><th class="r">1Y pProceeds</th><th class="r">Spend</th><th class="r">ROAS now</th><th class="r">1Y pROAS</th>'+
+        '</tr></thead><tbody>'+bodyRows+'</tbody></table>'+
+        '<div class="ch-foot">Observed proceeds = net of refunds, install-day cohort (matches ROAS tab). 1Y projection = weekly renewals (survival curve) + annual renewal (auto-renew-off intent × 20% billing). Annual renewal is modeled from intent — no cohort has reached its 1-yr renewal yet. Click a row for detail.</div></div>';
+
+      // detail panel for selected bucket
+      let detail = '';
+      const b = buckets.find(x=>x.key===proasSelected);
+      if (b){
+        const onPct = b.annual_subs>0?Math.round(b.annual_on/b.annual_subs*100):0;
+        const aliveP = b.weekly_subs>0?Math.round(b.weekly_alive/b.weekly_subs*100):0;
+        const aShare = b.actual>0?Math.round(b.annual_p/(b.weekly_p+b.annual_p)*100):0;
+        detail = '<div class="pf-apps" style="margin-top:16px"><h3>'+b.label+' — projection detail</h3>'+
+          '<table class="pf-table"><tbody>'+
+          '<tr><td class="pf-t-app">Observed proceeds</td><td class="pf-t-num r">'+fmtMoney(b.actual)+'</td></tr>'+
+          '<tr><td class="pf-t-app">+ Weekly renewal tail (→wk52)</td><td class="pf-t-num r">'+fmtMoney(b.weeklyTail)+'</td></tr>'+
+          '<tr><td class="pf-t-app">+ Annual renewal ('+Math.round(b.annualRate*100)+'% eff.)</td><td class="pf-t-num r">'+fmtMoney(b.annualRenew)+'</td></tr>'+
+          '<tr><td class="pf-t-app" style="font-weight:600">Projected value (1yr)</td><td class="pf-t-num r" style="font-weight:600">'+fmtMoney(b.projBase)+'</td></tr>'+
+          (b.hasSpend?'<tr><td class="pf-t-app">Spend</td><td class="pf-t-num r">'+fmtMoney(b.spend)+'</td></tr>'+
+          '<tr><td class="pf-t-app" style="font-weight:600">1Y pROAS</td><td class="pf-t-num r" style="font-weight:600;color:'+pRoasColorPct(b.pRoas)+'">'+(b.pRoas!=null?Math.round(b.pRoas*100)+'%':'—')+'</td></tr>':'')+
+          '</tbody></table>'+
+          '<div class="ch-sub" style="margin-top:10px">Subscriber base: <b>'+b.annual_subs+'</b> annual ('+onPct+'% still auto-renew on), <b>'+b.weekly_subs+'</b> weekly ('+aliveP+'% still paying). Annual = '+aShare+'% of proceeds — drives most of the projection.</div>'+
+          '</div>';
+      }
+      container.innerHTML = header + table + detail;
     }
 
     window.copyTxId = function(fullId, el, ev) {
