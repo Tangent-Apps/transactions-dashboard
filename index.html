@@ -1400,11 +1400,15 @@
         proj += tail * s.weeklyMult;
       }
       // annual renewal @ wk52: (1 - projected unsub@52) × (1 - billing), intent anchor-scaled on observed
-      const aw = Math.min(52, Math.max(1, ageWk));
+      // Auto-renew-off intent front-loads at D0 (installers often kill renewal right after buying —
+      // the pooled curve is already 66% unsub at wk0), so anchor on the cohort's OWN observed intent
+      // from day 0, no age gate. No count gate either: thin days are bounded by the ratio clamp below,
+      // and the per-day projections are summed, so noise averages out at the bucket level.
+      const aw = Math.min(52, Math.max(0, ageWk));
       const obsUnsub = r.annual_subs>0 ? 1 - ((r.annual_on||0)/r.annual_subs) : null;
       const pooledNow = ANNUAL_UNSUB[aw] || ANNUAL_UNSUB_WK52;
       let ratio = 1.0;
-      if (obsUnsub != null && pooledNow>0 && aw>=4) ratio = Math.max(0.85, Math.min(1.1, obsUnsub/pooledNow));
+      if (obsUnsub != null && pooledNow>0) ratio = Math.max(0.70, Math.min(1.1, obsUnsub/pooledNow));
       const unsub52 = Math.min(0.97, ANNUAL_UNSUB_WK52 * ratio * s.annualStretch);
       const annualRate = Math.max(0, (1-unsub52)*(1-s.billing));
       const annualRenew = annual_p * annualRate;
