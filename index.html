@@ -1118,8 +1118,8 @@
     const ROAS_RANGES = [30, 60, 90, 180, 0]; // 0 = All
     const ROAS_GEOS = [["all","All"],["US","US"],["GB","UK"]];
     let roasApp = "32830";
-    let roasGeo = "all";
-    let roasRange = 91;     // default to recent ~13 weeks (clean post-trial era); 0 = all
+    let roasGeo = "all";    // always all — no geo toggle
+    let roasRange = 90;     // default last 90 days (clean post-trial era); 0 = all time
     let roasGran = "week";  // day | week | month — week reads best for the milestone curves
     let roasShowRefunds = false;
     let roasData = {};      // "appId__geo" → payload (roas_cohorts, observed milestones)
@@ -1461,10 +1461,7 @@
       const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) =>
         '<button class="pf-range-btn '+(g===roasGran?"active":"")+'" onclick="setRoasGran(\''+g+'\')">'+name+'</button>'
       ).join("");
-      const geoBtns = ROAS_GEOS.map(([g,name]) =>
-        '<button class="pf-range-btn '+(g===roasGeo?"active":"")+'" onclick="setRoasGeo(\''+g+'\')">'+name+'</button>'
-      ).join("");
-      const rangeBtns = [[91,"13w"],[182,"26w"],[0,"All"]].map(([w,name]) =>
+      const rangeBtns = [[30,"Last 30 days"],[90,"Last 90 days"],[180,"Last 180 days"],[0,"All time"]].map(([w,name]) =>
         '<button class="pf-range-btn '+(w===roasRange?"active":"")+'" onclick="setRoasRange('+w+')">'+name+'</button>'
       ).join("");
       const d = roasData[roasKey()];
@@ -1474,7 +1471,6 @@
           '<div><div class="pf-m-label">ROAS &amp; projection</div>' +
             (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>' +
           '<div class="ch-filters">' +
-            '<div class="pf-ranges">'+geoBtns+'</div>' +
             '<div class="pf-ranges">'+granBtns+'</div>' +
             '<div class="pf-ranges">'+rangeBtns+'</div>' +
           '</div>' +
@@ -1499,7 +1495,7 @@
       const tiles =
         '<div class="pf-metrics" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0">' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
-            '<div class="pf-m-label">Spend ('+(roasRange===0?"all":roasRange===91?"13w":"26w")+')</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalSpend)+'</div></div>' +
+            '<div class="pf-m-label">Spend ('+(roasRange===0?"all time":"last "+roasRange+"d")+')</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalSpend)+'</div></div>' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
             '<div class="pf-m-label">Proceeds to date</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalProceeds)+'</div></div>' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
