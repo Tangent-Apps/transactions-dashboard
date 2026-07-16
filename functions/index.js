@@ -1521,6 +1521,35 @@ functions.http("roasCohorts", async (req, res) => {
 // per cohort-day it also emits the plan split (weekly vs annual), subscriber counts, and the
 // leading churn signals the forward projection needs: weekly subs still paying, annual subs still
 // auto-renew-on. The tab computes the actual projection (survival + intent curves) client-side —
+// Expected NET proceeds per successful weekly renewal, learned per app (+ geo) from recent
+// history — replaces the old global $6.32 flat assumption, which overstated GirlWalk US by ~16%
+// and GirlTalk/PolyAI by ~35%. Uses only real weekly renewals (name='renewal', positive-price,
+// non-refund, productId matching week/weekly), nets out weekly refunds in the same window, over a
+// recent 90-day window. Fallback: app+geo (>= min sample) -> app+all -> null (no weekly tail
+// projected rather than a misleading one). Never falls back to a hardcoded price.
+const WEEKLY_PROCEEDS_WINDOW_DAYS = 90;
+const WEEKLY_PROCEEDS_MIN_SAMPLE = 30;
+async function weeklyProceedsEstimate(appId, geo) {
+  const geoFilter = geo === "all" ? "" : `AND countryCode = '${geo}'`;
+  const sql = `
+SELECT
+  countIf(name='renewal' AND isRefund=0 AND toFloat64(proceeds)>0 AND productId ILIKE '%week%') AS n,
+  sumIf(toFloat64(proceeds), name='renewal' AND isRefund=0 AND toFloat64(proceeds)>0 AND productId ILIKE '%week%') AS gross,
+  sumIf(abs(toFloat64(proceeds)), isRefund=1 AND productId ILIKE '%week%') AS refunds
+FROM open_revenue.attributed_events_by_ts_rep
+WHERE applicationId = ${Number(appId)} AND isSandbox = 0
+  AND purchasedAt >= now() - INTERVAL ${WEEKLY_PROCEEDS_WINDOW_DAYS} DAY
+  ${geoFilter}
+FORMAT JSONEachRow`.trim();
+  const r = (await swQuery(sql))[0] || {};
+  const n = Number(r.n) || 0;
+  if (n < WEEKLY_PROCEEDS_MIN_SAMPLE) return null;
+  // refund-adjusted mean net per renewal (refunds reduce the numerator, count stays as the denom)
+  const mean = (Number(r.gross || 0) - Number(r.refunds || 0)) / n;
+  if (!(mean > 0)) return null;
+  return { value: Math.round(mean * 1000) / 1000, n };
+}
+
 // this function stays ratio-free / model-free, like roasCohorts. Observed ROAS in the tab is
 // derived from these same net-proceeds numbers, so it reconciles 1:1 with the ROAS tab.
 async function fetchProasCohorts(appId, geo) {
@@ -1576,6 +1605,22 @@ proceeds AS (
   WHERE applicationId = ${Number(appId)} AND isSandbox = 0
     AND (name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') OR isRefund = 1)
   GROUP BY otid
+),
+wprice AS (
+  -- Per-subscription recurring PRICE = the sub's FIRST positive-price paid event. We sell several
+  -- weekly plans at different prices (weekly.6 ~\$5.1, weekly.9 ~\$7.6, ...), so a cohort's future
+  -- renewals must be priced from the plan THAT cohort actually bought, not a blended average. There
+  -- is no trial anymore, so for post-trial cohorts the initial_purchase price IS the renewal price;
+  -- for legacy trial-era cohorts the first positive charge is the day-3 trial conversion (labelled
+  -- 'renewal'), which is likewise their true recurring price. argMin by purchasedAt captures both.
+  -- One row per otid. Aggregated per cohort below to that cohort's mean price.
+  SELECT originalTransactionId AS otid,
+    argMin(toFloat64(proceeds), purchasedAt) AS first_price
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+    AND isRefund = 0 AND toFloat64(proceeds) > 0
+  GROUP BY otid
 )
 SELECT toString(a.cohort_day) AS day,
   countIf(a.plan = 'weekly') AS weekly_subs,
@@ -1589,11 +1634,17 @@ SELECT toString(a.cohort_day) AS day,
   countIf(a.plan = 'annual') AS annual_subs,
   countIf(a.plan = 'annual' AND u.otid = '') AS annual_on,
   round(sumIf(pr.net, a.plan = 'weekly'), 2) AS weekly_p,
-  round(sumIf(pr.net, a.plan = 'annual'), 2) AS annual_p
+  round(sumIf(pr.net, a.plan = 'annual'), 2) AS annual_p,
+  -- this cohort's mean weekly recurring price (from each weekly sub's first positive charge).
+  -- Prices future renewals with the plan the cohort actually bought. Known from day 0 for every
+  -- sub (no trial dependency), so it's populated even for brand-new cohorts.
+  countIf(a.plan = 'weekly' AND wp.first_price > 0) AS wk_price_n,
+  round(avgIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0), 3) AS wk_renew_price
 FROM anchors a
 LEFT JOIN state s ON a.otid = s.otid
 LEFT JOIN unsub u ON a.otid = u.otid
 LEFT JOIN proceeds pr ON a.otid = pr.otid
+LEFT JOIN wprice wp ON a.otid = wp.otid
 GROUP BY a.cohort_day
 HAVING toDate(a.cohort_day) >= today() - ${ROAS_WINDOW_DAYS}
 ORDER BY a.cohort_day DESC
@@ -1630,8 +1681,18 @@ FORMAT JSONEachRow`.trim();
       weekly_alive: Number(r.weekly_alive) || 0,
       annual_subs: Number(r.annual_subs) || 0,
       annual_on: Number(r.annual_on) || 0,
+      wk_price: Number(r.wk_renew_price) || 0,   // this cohort's mean weekly recurring price (from D0 / first charge)
+      wk_price_n: Number(r.wk_price_n) || 0,
     };
   });
+
+  // expected weekly-renewal net proceeds: app+geo, fall back to app+all, else null (no tail).
+  let wp = await weeklyProceedsEstimate(Number(appId), g);
+  let wpSource = wp ? (g === "all" ? "app" : "app_geo") : null;
+  if (!wp && g !== "all") {
+    wp = await weeklyProceedsEstimate(Number(appId), "all");
+    wpSource = wp ? "app_fallback" : null;
+  }
 
   return {
     appId: Number(appId),
@@ -1639,6 +1700,10 @@ FORMAT JSONEachRow`.trim();
     geo: g,
     tz: ROAS_TZ,
     windowDays: ROAS_WINDOW_DAYS,
+    weeklyProceeds: wp ? wp.value : null,
+    weeklyProceedsN: wp ? wp.n : 0,
+    weeklyProceedsSource: wpSource,
+    weeklyProceedsWindowDays: WEEKLY_PROCEEDS_WINDOW_DAYS,
     rows,
     generatedAt: new Date().toISOString(),
   };
