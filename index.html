@@ -146,6 +146,40 @@
     .pf-tip .t-date { color: #888; font-size: 10px; }
     .pf-tip .t-mrr { color: #fbbf24; font-weight: 700; }
     .pf-tip .t-arr { color: #a5b4fc; font-weight: 600; font-size: 10px; margin-top: 1px; }
+    /* merged ROAS chart */
+    .rc-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; flex-wrap:wrap; gap:10px; }
+    .rc-cap { font-size:12px; color:#8a8a8a; }
+    .rc-cap b { color:#e8e8e8; font-weight:600; }
+    .rc-legend { display:flex; gap:6px; flex-wrap:wrap; }
+    .rc-lg { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:600; padding:5px 10px; border-radius:20px; border:1px solid #232323; cursor:pointer; user-select:none; color:#8a8a8a; background:#151515; transition:all .12s; }
+    .rc-lg .sw { width:14px; height:3px; border-radius:2px; }
+    .rc-lg.on { color:#f2f2f2; background:#1d1d1d; }
+    .rc-lg.off { opacity:.42; }
+    .rc-curve { fill:none; stroke-width:2.1; stroke-linejoin:round; stroke-linecap:round; }
+    .rc-curve.proj { stroke-dasharray:2 4; opacity:.9; }
+    .rc-be { stroke:#3a3a3a; stroke-width:1; stroke-dasharray:3 3; }
+    .rc-sel { stroke:#4b5563; stroke-width:1; }
+    .rc-grid line { stroke:#1b1b1b; }
+    .rc-ax { fill:#666; font-size:10px; }
+    /* expand card */
+    tr.rc-detail td { padding:0; border:none; }
+    .rc-card { background:#101816; border:1px solid #1c3029; border-radius:12px; margin:4px 0 14px; padding:16px 18px; }
+    .rc-dgrid { display:grid; grid-template-columns:1.3fr 1fr; gap:22px; }
+    .rc-dblock h4 { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#666; margin:0 0 9px; font-weight:600; }
+    .rc-drow { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #16211d; font-variant-numeric:tabular-nums; }
+    .rc-drow.tot { font-weight:640; border-bottom:none; padding-top:8px; }
+    .rc-drow .k { color:#8a8a8a; }
+    .rc-dxrow { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
+    .rc-dx { font-size:11px; font-weight:600; padding:5px 9px; border-radius:8px; background:#152119; border:1px solid #1e3029; display:flex; flex-direction:column; align-items:center; min-width:52px; }
+    .rc-dx .lbl { font-size:9px; color:#666; font-weight:600; }
+    .rc-dx.proj { border-style:dashed; opacity:.85; }
+    .rc-note { color:#666; font-size:11px; margin-top:12px; line-height:1.5; }
+    tr.rc-cohort { cursor:pointer; }
+    tr.rc-cohort:hover { background:#151515; }
+    tr.rc-cohort.sel { background:#12251f; }
+    .rc-chev { display:inline-block; width:13px; color:#666; transition:transform .15s; }
+    tr.rc-cohort.sel .rc-chev { transform:rotate(90deg); color:#4ade80; }
+    @media(max-width:760px){ .rc-dgrid{grid-template-columns:1fr;} }
     .pf-legend { display: flex; justify-content: space-between; margin-bottom: 8px; padding: 0 16px; font-size: 11px; color: #888; }
     .pf-legend .pf-lg { display: flex; align-items: center; gap: 6px; }
     .pf-legend i { width: 16px; height: 0; border-top-width: 2px; border-top-style: solid; display: inline-block; }
@@ -235,7 +269,6 @@
       <button class="section-btn" id="sectionChurn" onclick="setSection('churn')">Churn</button>
       <button class="section-btn" id="sectionRefunds" onclick="setSection('refunds')">Refunds</button>
       <button class="section-btn" id="sectionRoas" onclick="setSection('roas')">ROAS</button>
-      <button class="section-btn" id="sectionProas" onclick="setSection('proas')">pROAS</button>
     </nav>
   </div>
 
@@ -410,7 +443,6 @@
       document.getElementById("sectionChurn").className = "section-btn" + (sec === "churn" ? " active" : "");
       document.getElementById("sectionRefunds").className = "section-btn" + (sec === "refunds" ? " active" : "");
       document.getElementById("sectionRoas").className = "section-btn" + (sec === "roas" ? " active" : "");
-      document.getElementById("sectionProas").className = "section-btn" + (sec === "proas" ? " active" : "");
       // Activity-only controls hide off Activity via visibility (keeps the grid
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
@@ -418,7 +450,6 @@
       if (sec === "churn") { renderChurn(); loadChurn(); return; }
       if (sec === "refunds") { renderRefunds(); loadRefunds(); return; }
       if (sec === "roas") { renderRoas(); loadRoas(); return; }
-      if (sec === "proas") { renderProas(); loadProas(); return; }
       renderAll();
     };
 
@@ -1088,27 +1119,45 @@
     const ROAS_GEOS = [["all","All"],["US","US"],["GB","UK"]];
     let roasApp = "32830";
     let roasGeo = "all";
-    let roasRange = 90;
-    let roasGran = "day";   // day | week | month
-    let roasShowRefunds = true;
-    let roasData = {};      // "appId__geo" → payload
+    let roasRange = 91;     // default to recent ~13 weeks (clean post-trial era); 0 = all
+    let roasGran = "week";  // day | week | month — week reads best for the milestone curves
+    let roasShowRefunds = false;
+    let roasData = {};      // "appId__geo" → payload (roas_cohorts, observed milestones)
     let roasInflight = {};  // "appId__geo" → true while loading
     let roasError = null;
+    let roasSelected = null; // cohort bucket key expanded in the table + highlighted on chart
+    // Dx milestone lines on the merged chart. observed where cohort aged past the milestone,
+    // projected (dashed) beyond. D180/D365 are always projected (no cohort that old yet).
+    const ROAS_DX = [
+      { k:"D0", age:0,  c:"#60a5fa" }, { k:"D7", age:7,  c:"#34d399" },
+      { k:"D30",age:30, c:"#fbbf24" }, { k:"D60",age:60, c:"#f472b6" },
+      { k:"D90",age:90, c:"#a78bfa" }, { k:"D180",age:180,c:"#fb923c" },
+      { k:"D365",age:365,c:"#f87171" },
+    ];
+    const roasDxOn = { D0:true, D7:true, D30:true, D60:false, D90:true, D180:false, D365:true };
     function roasKey() { return roasApp + "__" + roasGeo; }
-    window.setRoasApp = function(id) { roasApp = id; renderRoas(); loadRoas(); };
-    window.setRoasGeo = function(g) { roasGeo = g; renderRoas(); loadRoas(); };
+    window.setRoasApp = function(id) { roasApp = id; roasSelected=null; renderRoas(); loadRoas(); };
+    window.setRoasGeo = function(g) { roasGeo = g; roasSelected=null; renderRoas(); loadRoas(); };
     window.setRoasRange = function(w) { roasRange = w; renderRoas(); };
-    window.setRoasGran = function(g) { roasGran = g; renderRoas(); };
+    window.setRoasGran = function(g) { roasGran = g; roasSelected=null; renderRoas(); };
     window.toggleRoasRefunds = function() { roasShowRefunds = !roasShowRefunds; renderRoas(); };
+    window.toggleRoasDx = function(k) { roasDxOn[k] = !roasDxOn[k]; renderRoas(); };
+    window.selectRoasCohort = function(key) { roasSelected = roasSelected===key ? null : key; renderRoas(); };
 
+    let roasProasData = {}; // "appId__geo" → proas_cohorts payload (projection inputs), for the merged view
     async function loadRoas() {
       const key = roasKey();
       if (roasInflight[key]) return;     // always refetch on view; only guard against a concurrent load
       roasInflight[key] = true; roasError = null;
       try {
-        const snap = await getDoc(doc(db, "roas_cohorts", key));
-        if (!snap.exists()) throw new Error("no data yet for this app/geo");
-        roasData[key] = JSON.parse(snap.data().payload);
+        // load observed milestones (roas_cohorts) and projection inputs (proas_cohorts) together
+        const [rSnap, pSnap] = await Promise.all([
+          getDoc(doc(db, "roas_cohorts", key)),
+          getDoc(doc(db, "proas_cohorts", key)),
+        ]);
+        if (!rSnap.exists()) throw new Error("no data yet for this app/geo");
+        roasData[key] = JSON.parse(rSnap.data().payload);
+        if (pSnap.exists()) roasProasData[key] = JSON.parse(pSnap.data().payload);
       } catch (e) {
         console.warn("roas load failed", e);
         roasError = e.message;
@@ -1238,13 +1287,176 @@
       return null; // never crossed → not paid back
     }
 
+    // Build per-bucket projection inputs from the proas doc, keyed by the SAME bucket key as
+    // roasAggregate (so observed + projected align by cohort). Returns Map(key -> {projByAge fn,
+    // proj1y, projLow, projHigh, weeklyTail, annualRenew, annualRate, avgLift, wkPrice, subs...}).
+    function roasProjByBucket(gran) {
+      const pd = roasProasData[roasKey()];
+      const out = new Map();
+      if (!pd || !pd.rows) return out;
+      const wkMean = typeof pd.weeklyProceeds === "number" ? pd.weeklyProceeds : null;
+      const groups = new Map();
+      for (const r of pd.rows) {
+        const key = roasBucket(r.day, gran).key;
+        (groups.get(key) || groups.set(key, []).get(key)).push(r);
+      }
+      for (const [key, rs] of groups) {
+        let base=0, low=0, high=0, annualRenew=0, actual=0, spend=0, hasSpend=false,
+            weekly_p=0, annual_p=0, weekly_subs=0, weekly_alive=0, annual_subs=0, annual_on=0,
+            sumLiftW=0, wSum=0, sumPriceW=0;
+        for (const r of rs) {
+          const lo=proasProjectDay(r,"low",wkMean), ba=proasProjectDay(r,"base",wkMean), hi=proasProjectDay(r,"high",wkMean);
+          base+=ba.proj; low+=lo.proj; high+=hi.proj; annualRenew+=ba.annualRenew; actual+=ba.actual;
+          weekly_p+=r.weekly_p||0; annual_p+=r.annual_p||0;
+          weekly_subs+=r.weekly_subs||0; weekly_alive+=r.weekly_alive||0;
+          annual_subs+=r.annual_subs||0; annual_on+=r.annual_on||0;
+          sumLiftW+=ba.lift*(r.weekly_alive||0); wSum+=(r.weekly_alive||0);
+          const price=(r.wk_price>0?r.wk_price:(wkMean>0?wkMean:0)); sumPriceW+=price*(r.weekly_alive||0);
+          if (r.spend!=null){ spend+=r.spend; hasSpend=true; }
+        }
+        out.set(key, {
+          rs, spend, hasSpend, proj1y:base, projLow:low, projHigh:high, annualRenew, actual,
+          weekly_p, annual_p, weekly_subs, weekly_alive, annual_subs, annual_on,
+          avgLift: wSum>0?sumLiftW/wSum:1.0, wkPrice: wSum>0?sumPriceW/wSum:(wkMean||0),
+          weeklyTail: base-actual-annualRenew, annualRate: annual_p>0?annualRenew/annual_p:0,
+          // projected cumulative ROAS % at a milestone age (sum each cohort-day's cum-to-age / spend)
+          projDx: (ageDays) => {
+            if (!hasSpend || spend<=0) return null;
+            let c=0; for (const r of rs) c += proasCumToAge(r, wkMean, ageDays);
+            return (c/spend)*100;
+          },
+        });
+      }
+      return out;
+    }
+
+    // Per-cohort Dx ROAS: observed (real milestone $ from roas bucket) where the cohort has aged past
+    // the milestone, projected (from the proas model) beyond. Returns {val, obs} or null.
+    function roasDxValue(b, p, dx) {
+      const observedReady = b.hasSpend && b.spend>0 && b.minAge >= dx.age;
+      if (observedReady) return { val: (b.p[dx.age] != null ? b.p[dx.age] : b.pLife)/b.spend*100, obs:true };
+      if (p && p.hasSpend && p.spend>0) { const v = p.projDx(dx.age); return v==null?null:{ val:v, obs:false }; }
+      return null;
+    }
+    // roas bucket doesn't store p60/p180/p365; observed is only defined for stored milestones.
+    // For unstored ages we still allow observed via the exact per-age curve if aged past it.
+    function roasObservedDx(b, dx) {
+      if (!b.hasSpend || b.spend<=0 || b.minAge < dx.age) return null;
+      // sum net proceeds accrued by dx.age from the per-age curve
+      let c=0; const ages=Object.keys(b.curveByAge||{}).map(Number);
+      ages.forEach(a=>{ if(a<=dx.age) c += b.curveByAge[a]; });
+      return c>0 ? c/b.spend*100 : (b.p[dx.age]!=null ? b.p[dx.age]/b.spend*100 : null);
+    }
+
+    let roasChartGeom = null; // stashed for hover
+    function roasChart(bucketsNewestFirst, projByKey) {
+      const B = [...bucketsNewestFirst].reverse(); // oldest → newest, left → right
+      if (!B.length) return '<div class="pf-chart-wrap"><div class="loading">No cohorts</div></div>';
+      const W=1140,H=360,PADL=44,PADR=16,PADT=14,PADB=32;
+      // compute Dx series
+      const series = ROAS_DX.map(dx => {
+        const pts = B.map((b,i) => {
+          const obsV = roasObservedDx(b, dx);
+          let v, obs;
+          if (obsV!=null) { v=obsV; obs=true; }
+          else { const p=projByKey.get(b.key); v = p? p.projDx(dx.age):null; obs=false; }
+          return { i, v, obs };
+        });
+        return { dx, pts };
+      });
+      let ymax=1.4;
+      series.forEach(s=>{ if(!roasDxOn[s.dx.k])return; s.pts.forEach(p=>{ if(p.v!=null) ymax=Math.max(ymax, p.v/100); }); });
+      ymax = Math.ceil(ymax*10)/10;
+      const X = i => PADL + (B.length>1 ? i*((W-PADL-PADR)/(B.length-1)) : (W-PADL-PADR)/2);
+      const Y = v => PADT + (1 - v/ymax)*(H-PADT-PADB);
+      roasChartGeom = { B, X, W, PADL, PADR, PADT, PADB, H };
+
+      let grid='',axis='';
+      const step = ymax>2?0.5:0.25;
+      for(let g=0; g<=ymax+1e-9; g+=step){ const yy=Y(g); grid+='<line x1="'+PADL+'" y1="'+yy+'" x2="'+(W-PADR)+'" y2="'+yy+'"/>'; axis+='<text class="rc-ax" x="'+(PADL-8)+'" y="'+(yy+3)+'" text-anchor="end">'+Math.round(g*100)+'%</text>'; }
+      const be=Y(1); const beLine='<line class="rc-be" x1="'+PADL+'" y1="'+be+'" x2="'+(W-PADR)+'" y2="'+be+'"/>';
+      let xlab=''; B.forEach((b,i)=>{ if(i%Math.ceil(B.length/7)===0||i===B.length-1) xlab+='<text class="rc-ax" x="'+X(i)+'" y="'+(H-PADB+16)+'" text-anchor="middle">'+b.label.replace(/^Week of |^/,'')+'</text>'; });
+
+      let lines='',dots='';
+      series.forEach(s=>{ if(!roasDxOn[s.dx.k])return; const col=s.dx.c;
+        let solid='',dashed='',prev=null;
+        s.pts.forEach(p=>{ if(p.v==null){prev=null;return;} const cur={x:X(p.i),y:Y(p.v/100),obs:p.obs};
+          if(prev){ const seg='M'+prev.x+','+prev.y+' L'+cur.x+','+cur.y+' '; if(prev.obs&&cur.obs) solid+=seg; else dashed+=seg; }
+          prev=cur;
+          dots+='<circle cx="'+cur.x+'" cy="'+cur.y+'" r="'+(p.obs?2.6:2.2)+'" fill="'+(p.obs?col:'#131313')+'" stroke="'+col+'" stroke-width="1.4"/>';
+        });
+        lines+='<path class="rc-curve" d="'+solid+'" stroke="'+col+'"/><path class="rc-curve proj" d="'+dashed+'" stroke="'+col+'"/>';
+      });
+      let selLine='';
+      if(roasSelected!=null){ const i=B.findIndex(b=>b.key===roasSelected); if(i>=0) selLine='<line class="rc-sel" x1="'+X(i)+'" y1="'+PADT+'" x2="'+X(i)+'" y2="'+(H-PADB)+'"/>'; }
+      let hot=''; B.forEach((b,i)=>{ const w=(W-PADL-PADR)/Math.max(1,B.length-1); hot+='<rect x="'+(X(i)-w/2)+'" y="'+PADT+'" width="'+w+'" height="'+(H-PADT-PADB)+'" fill="transparent" data-i="'+i+'"/>'; });
+
+      const legend = '<div class="rc-legend">'+ROAS_DX.map(dx=>'<span class="rc-lg '+(roasDxOn[dx.k]?"on":"off")+'" onclick="toggleRoasDx(\''+dx.k+'\')"><span class="sw" style="background:'+dx.c+'"></span>'+dx.k+'</span>').join('')+'</div>';
+      return '<div class="pf-chart-wrap" id="roasChartWrap">'+
+        '<div class="rc-top"><div class="rc-cap">ROAS by milestone across cohorts — <b>solid</b> observed, <b>dashed</b> projected</div>'+legend+'</div>'+
+        '<svg viewBox="0 0 '+W+' '+H+'"><g class="rc-grid">'+grid+'</g>'+axis+xlab+beLine+selLine+lines+dots+hot+'</svg>'+
+        '<div class="pf-tip" id="roasTip"></div></div>';
+    }
+
+    function roasWireHover(bucketsNewestFirst, projByKey) {
+      const wrap=document.getElementById("roasChartWrap"); if(!wrap||!roasChartGeom) return;
+      const tip=document.getElementById("roasTip"); const {B}=roasChartGeom;
+      wrap.querySelectorAll('rect[data-i]').forEach(rect=>{
+        rect.addEventListener('mousemove', (e)=>{
+          const b=B[+rect.dataset.i]; const p=projByKey.get(b.key);
+          const rows = ROAS_DX.filter(dx=>roasDxOn[dx.k]).map(dx=>{
+            const obsV=roasObservedDx(b,dx); let v,obs;
+            if(obsV!=null){v=obsV;obs=true;} else {v=p?p.projDx(dx.age):null;obs=false;}
+            if(v==null) return '';
+            return '<div class="t-row"><span class="t-sw" style="background:'+dx.c+'"></span>'+dx.k+(obs?'':' <span style="color:#666;font-size:9.5px">proj</span>')+'<span class="t-val">'+Math.round(v)+'%</span></div>';
+          }).join('');
+          tip.innerHTML='<div class="t-date">'+b.label+'</div>'+rows;
+          const wr=wrap.getBoundingClientRect();
+          tip.style.left=(e.clientX-wr.left)+'px'; tip.style.top=(e.clientY-wr.top-8)+'px'; tip.style.opacity=1;
+        });
+        rect.addEventListener('mouseleave', ()=>{ tip.style.opacity=0; });
+      });
+    }
+
+    function roasDetailCard(b, p) {
+      if (!p) return '<div class="rc-card"><div class="rc-note">No projection data for this cohort yet.</div></div>';
+      const money = fmtMoney;
+      const dxChips = ROAS_DX.map(dx=>{
+        const obsV=roasObservedDx(b,dx); let v,obs;
+        if(obsV!=null){v=obsV;obs=true;} else {v=p.projDx(dx.age);obs=false;}
+        if(v==null) return '';
+        return '<div class="rc-dx '+(obs?'':'proj')+'"><span class="lbl">'+dx.k+(obs?'':' ·p')+'</span>'+Math.round(v)+'%</div>';
+      }).join('');
+      const pRoas = p.hasSpend&&p.spend>0 ? p.proj1y/p.spend*100 : null;
+      const pLow  = p.hasSpend&&p.spend>0 ? p.projLow/p.spend*100 : null;
+      const pHigh = p.hasSpend&&p.spend>0 ? p.projHigh/p.spend*100 : null;
+      const onPct = p.annual_subs>0?Math.round(p.annual_on/p.annual_subs*100):0;
+      const aliveP = p.weekly_subs>0?Math.round(p.weekly_alive/p.weekly_subs*100):0;
+      const aShare = (p.weekly_p+p.annual_p)>0?Math.round(p.annual_p/(p.weekly_p+p.annual_p)*100):0;
+      return '<div class="rc-card"><div class="rc-dgrid">'+
+        '<div class="rc-dblock"><h4>Projection breakdown</h4>'+
+          '<div class="rc-drow"><span class="k">Observed proceeds</span><b>'+money(p.actual)+'</b></div>'+
+          '<div class="rc-drow"><span class="k">+ Weekly renewal tail (→wk52)</span><b>'+money(p.weeklyTail)+'</b></div>'+
+          '<div class="rc-drow"><span class="k">+ Annual renewal ('+Math.round(p.annualRate*100)+'% eff.)</span><b>'+money(p.annualRenew)+'</b></div>'+
+          '<div class="rc-drow tot"><span class="k">1Y projected value</span><b>'+money(p.proj1y)+'</b></div>'+
+          '<div class="rc-drow"><span class="k">Range (worst–best)</span><span class="dim">'+money(p.projLow)+' – '+money(p.projHigh)+'</span></div>'+
+          (p.hasSpend?'<div class="rc-drow"><span class="k">Spend</span><b>'+money(p.spend)+'</b></div>'+
+          '<div class="rc-drow tot"><span class="k">1Y pROAS</span><b style="color:'+(pRoas==null?"":roasColor(pRoas))+'">'+(pRoas==null?"—":Math.round(pRoas)+'%')+(pLow!=null?' <span class="dim" style="font-weight:400">('+Math.round(pLow)+'–'+Math.round(pHigh)+'%)</span>':'')+'</b></div>':'')+
+        '</div>'+
+        '<div class="rc-dblock"><h4>ROAS by milestone</h4><div class="rc-dxrow">'+dxChips+'</div>'+
+          '<h4 style="margin-top:16px">Subscriber base</h4>'+
+          '<div class="rc-drow"><span class="k">Annual subs</span><b>'+p.annual_subs+' <span class="dim" style="font-weight:400">('+onPct+'% still on)</span></b></div>'+
+          '<div class="rc-drow"><span class="k">Weekly subs</span><b>'+p.weekly_subs+' <span class="dim" style="font-weight:400">('+aliveP+'% still paying)</span></b></div>'+
+          '<div class="rc-drow"><span class="k">Weekly price</span><b>'+(p.wkPrice>0?money(p.wkPrice):"—")+'</b></div>'+
+          '<div class="rc-drow"><span class="k">Retention lift vs curve</span><b>'+p.avgLift.toFixed(2)+'×</b></div>'+
+          '<div class="rc-note">Dashed milestones (·p) are projected — no cohort has reached that age yet. Annual = '+aShare+'% of proceeds; renewal is modeled from auto-renew-off intent (no annual cohort has hit its 1-yr renewal).</div>'+
+        '</div></div></div>';
+    }
+
     function renderRoas() {
       const container = document.getElementById("container");
       const appBtns = ROAS_APPS.map(([id,name]) =>
         '<button class="filter-btn '+(id===roasApp?"active":"")+'" onclick="setRoasApp(\''+id+'\')">'+name+'</button>'
-      ).join("");
-      const ranBtns = ROAS_RANGES.map(w =>
-        '<button class="pf-range-btn '+(w===roasRange?"active":"")+'" onclick="setRoasRange('+w+')">'+(w===0?"All":w+"D")+'</button>'
       ).join("");
       const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) =>
         '<button class="pf-range-btn '+(g===roasGran?"active":"")+'" onclick="setRoasGran(\''+g+'\')">'+name+'</button>'
@@ -1252,18 +1464,19 @@
       const geoBtns = ROAS_GEOS.map(([g,name]) =>
         '<button class="pf-range-btn '+(g===roasGeo?"active":"")+'" onclick="setRoasGeo(\''+g+'\')">'+name+'</button>'
       ).join("");
-      const refBtn = '<button class="pf-range-btn '+(roasShowRefunds?"active":"")+'" onclick="toggleRoasRefunds()">Refunds</button>';
+      const rangeBtns = [[91,"13w"],[182,"26w"],[0,"All"]].map(([w,name]) =>
+        '<button class="pf-range-btn '+(w===roasRange?"active":"")+'" onclick="setRoasRange('+w+')">'+name+'</button>'
+      ).join("");
       const d = roasData[roasKey()];
       const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
       const header =
         '<div class="pf-head">' +
-          '<div><div class="pf-m-label">ROAS · cohort-vaulted</div>' +
+          '<div><div class="pf-m-label">ROAS &amp; projection</div>' +
             (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>' +
           '<div class="ch-filters">' +
             '<div class="pf-ranges">'+geoBtns+'</div>' +
             '<div class="pf-ranges">'+granBtns+'</div>' +
-            '<div class="pf-ranges">'+ranBtns+'</div>' +
-            '<div class="pf-ranges">'+refBtn+'</div>' +
+            '<div class="pf-ranges">'+rangeBtns+'</div>' +
           '</div>' +
         '</div>' +
         '<div class="ch-appbar">'+appBtns+'</div>';
@@ -1272,82 +1485,67 @@
       if (roasError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load ROAS</h2><p>'+roasError+'</p></div>'; return; }
       if (!d) { container.innerHTML = header + '<div class="loading">Loading ROAS…</div>'; return; }
 
-      // range filter on the raw daily rows (by age), then aggregate to granularity
-      let rows = (d.rows||[]);
-      if (roasRange > 0) rows = rows.filter(r => r.ageDays <= roasRange);
-      const buckets = roasAggregate(rows, roasGran);
+      // range filter on raw rows by cohort age, then aggregate (default 13w hides noisy trial-era)
+      let rrows = (d.rows||[]);
+      if (roasRange > 0) rrows = rrows.filter(r => r.ageDays <= roasRange);
+      const buckets = roasAggregate(rrows, roasGran);        // observed milestones, newest first
+      const projByKey = roasProjByBucket(roasGran);          // projection inputs, aligned by key
 
-      // window totals from summed dollars
+      // totals (over the selected range)
       let totalSpend = 0, totalProceeds = 0;
-      rows.forEach(r => { if (r.spend != null) { totalSpend += r.spend; totalProceeds += r.proceeds; } });
+      rrows.forEach(r => { if (r.spend != null) { totalSpend += r.spend; totalProceeds += r.proceeds; } });
       const blended = totalSpend > 0 ? (totalProceeds/totalSpend)*100 : null;
-      const rangeLabel = roasRange === 0 ? "all" : roasRange + "d";
 
       const tiles =
         '<div class="pf-metrics" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0">' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
-            '<div class="pf-m-label">Spend ('+rangeLabel+')</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalSpend)+'</div></div>' +
+            '<div class="pf-m-label">Spend ('+(roasRange===0?"all":roasRange===91?"13w":"26w")+')</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalSpend)+'</div></div>' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
             '<div class="pf-m-label">Proceeds to date</div><div class="pf-m-value" style="font-size:26px">'+fmtMoney(totalProceeds)+'</div></div>' +
           '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
             '<div class="pf-m-label">Blended ROAS now</div><div class="pf-m-value" style="font-size:26px;color:'+(blended==null?"#fff":roasColor(blended))+'">'+(blended==null?"—":Math.round(blended)+"%")+'</div></div>' +
         '</div>';
 
-      const bodyRows = buckets.map(b => {
-        const spendCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>';
-        const procCell = !b.hasSpend ? '<td class="pf-t-num r dim">—</td>' : '<td class="pf-t-num r">'+fmtMoney(b.pLife)+'</td>';
-        const refCell = !roasShowRefunds ? '' : (b.refunds > 0 ? '<td class="pf-t-num r" style="color:#f87171">-'+fmtMoney(b.refunds)+'</td>' : '<td class="pf-t-num r dim">—</td>');
-        const be = roasBreakEven(b);
-        const beCell = be===undefined ? '<td class="pf-t-num r dim">—</td>'
-          : be===null ? '<td class="pf-t-num r" style="color:#f87171">not yet</td>'
-          : '<td class="pf-t-num r" style="color:#4ade80">D'+be.age+'</td>';
-        return '<tr><td class="pf-t-app">'+b.label+'</td>'+spendCell+procCell+refCell+
-          roasCell(b.d0)+roasCell(b.d7)+roasCell(b.d30)+roasCell(b.d90)+roasCell(b.now,true)+beCell+'</tr>';
+      // ---- chart: cohorts oldest→newest (left→right) ----
+      const chart = roasChart(buckets, projByKey);
+
+      // ---- table with per-Dx cols + projection + expand cards ----
+      const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Install day";
+      const rowsHtml = buckets.map(b => {
+        const p = projByKey.get(b.key);
+        const pRoas = p && p.hasSpend && p.spend>0 ? p.proj1y/p.spend*100 : null;
+        const pLow  = p && p.hasSpend && p.spend>0 ? p.projLow/p.spend*100 : null;
+        const pHigh = p && p.hasSpend && p.spend>0 ? p.projHigh/p.spend*100 : null;
+        const sel = b.key===roasSelected;
+        let tr = '<tr class="rc-cohort'+(sel?' sel':'')+'" onclick="selectRoasCohort(\''+b.key+'\')">'+
+          '<td class="pf-t-app"><span class="rc-chev">›</span> '+b.label+'</td>'+
+          (b.hasSpend?'<td class="pf-t-num r">'+fmtMoney(b.pLife)+'</td>':'<td class="pf-t-num r dim">—</td>')+
+          (b.hasSpend?'<td class="pf-t-num r">'+fmtMoney(b.spend)+'</td>':'<td class="pf-t-num r dim">—</td>')+
+          roasCell(b.now,true)+
+          '<td class="pf-t-num r" style="color:'+(pRoas==null?"":roasColor(pRoas))+';font-weight:600">'+
+            (pRoas==null?'<span class="dim">—</span>':Math.round(pRoas)+'%')+
+            (pLow!=null?'<div class="pf-band">'+Math.round(pLow)+'–'+Math.round(pHigh)+'%</div>':'')+
+          '</td></tr>';
+        if (sel) tr += '<tr class="rc-detail"><td colspan="5">'+roasDetailCard(b, p)+'</td></tr>';
+        return tr;
       }).join("");
+      const table = '<div class="pf-apps"><table class="pf-table"><thead><tr>' +
+        '<th>'+periodCol+'</th><th class="r">Proceeds</th><th class="r">Spend</th>'+
+        '<th class="r">ROAS now</th><th class="r">1Y pROAS<div class="pf-band" style="font-weight:400">base · worst–best</div></th>' +
+        '</tr></thead><tbody>'+rowsHtml+'</tbody></table>' +
+        '<div class="ch-foot">Solid = observed ROAS (net of store cut ÷ ad spend), dashed = projected. Install-day cohorts, '+(d.tz||"account")+' time. Click a row for the projection breakdown. 1Y pROAS band flexes billing-failure, weekly renewal &amp; annual auto-renew-off intent.</div></div>';
 
-      const legend = '<div class="ch-legend">' +
-        '<span class="ch-lg"><i style="background:#f87171"></i>&lt; 70% underwater</span>' +
-        '<span class="ch-lg"><i style="background:#fbbf24"></i>70–100%</span>' +
-        '<span class="ch-lg"><i style="background:#4ade80"></i>&gt; 100% profitable</span>' +
-        '<span class="ch-lg"><i style="background:#333"></i>— not matured / no spend</span></div>';
-
-      const periodCol = roasGran === "month" ? "Month" : roasGran === "week" ? "Week" : "Spend day";
-      const table = '<div class="pf-apps"><h3>By '+(roasGran==="day"?"spend day":roasGran)+'</h3><table class="pf-table"><thead><tr>' +
-        '<th>'+periodCol+'</th><th class="r">Spend</th><th class="r">Proceeds</th>'+(roasShowRefunds?'<th class="r">Refunds</th>':'') +
-        '<th class="r">D0</th><th class="r">D7</th><th class="r">D30</th><th class="r">D90</th><th class="r">ROAS now</th><th class="r">Break-even</th>' +
-        '</tr></thead><tbody>'+bodyRows+'</tbody></table>' +
-        '<div class="ch-foot">ROAS % = proceeds (net of store cut) ÷ ad spend. Cohort = first paid day per subscription, in '+(d.tz||"account")+' time. Break-even = exact date cumulative proceeds first covered spend (running-summed from per-day events). Refunds subtract from their original cohort.</div></div>';
-
-      container.innerHTML = header + tiles + table;
+      container.innerHTML = header + tiles + chart + table;
+      roasWireHover(buckets, projByKey);
     }
 
-    // ========================= pROAS (projection) tab =========================
-    // Consumes proas_cohorts docs (install-day cohorts, plan split + sub counts + churn signals),
-    // reuses roasBucket for the same day/week/month grain, and projects each cohort's revenue to
+    // ================= projection model (feeds the merged ROAS tab) =================
+    // Consumes proas_cohorts docs (install-day cohorts, plan split + sub counts + churn signals).
+    // The merged ROAS tab loads these via loadRoas() and uses the functions below (proasProjectDay,
+    // proasCumToAge) to draw the projected (dashed) Dx lines and the per-cohort projection card.
+    // Model is client-side so it can be tuned without redeploying. Projects each cohort's revenue to
     // 1 year: observed proceeds + weekly renewal tail (survival curve) + annual renewal (auto-renew
-    // -off intent × 20% billing). Observed ROAS here == ROAS tab (same net proceeds). Model is
-    // client-side so it can be tuned without redeploying.
-    const PROAS_APPS = ROAS_APPS, PROAS_GEOS = ROAS_GEOS, PROAS_RANGES = ROAS_RANGES;
-    let proasApp = "32830", proasGeo = "all", proasRange = 0, proasGran = "week";
-    let proasData = {}, proasInflight = {}, proasError = null, proasSelected = null;
-    function proasKey() { return proasApp + "__" + proasGeo; }
-    window.setProasApp = function(id){ proasApp=id; proasSelected=null; renderProas(); loadProas(); };
-    window.setProasGeo = function(g){ proasGeo=g; proasSelected=null; renderProas(); loadProas(); };
-    window.setProasGran = function(g){ proasGran=g; proasSelected=null; renderProas(); };
-    window.selectProas = function(k){ proasSelected=k; renderProas(); };
-
-    async function loadProas(){
-      const key = proasKey();
-      if (proasInflight[key]) return;
-      proasInflight[key] = true; proasError = null;
-      try {
-        const snap = await getDoc(doc(db, "proas_cohorts", key));
-        if (!snap.exists()) throw new Error("no pROAS data yet for this app/geo");
-        proasData[key] = JSON.parse(snap.data().payload);
-      } catch(e){ console.warn("proas load failed", e); proasError = e.message; }
-      finally { delete proasInflight[key]; if (section==="proas") renderProas(); }
-    }
-
+    // -off intent × billing discount). Observed ROAS == ROAS tab (same net proceeds).
     // --- projection model (from the pROAS analysis; GirlWalk-calibrated) ---
     const WK_SURVIVAL = [1.000,0.554,0.401,0.323,0.248,0.222,0.196,0.166,0.135,0.118,0.100,0.096,
       0.092,0.092,0.092,0.092,0.092,0.084,0.075,0.067,0.059,0.057,0.055,0.053,0.051,0.049,0.047,0.045,
@@ -1422,113 +1620,42 @@
       return { proj, actual: weekly_p+annual_p, annualRenew, annualRate, lift };
     }
 
-    // Aggregate proas rows into buckets (reuse roasBucket for identical grain). Project each
-    // cohort-DAY individually at all 3 scenarios, then SUM the per-day projections into the
-    // bucket — correct for mixed-age buckets (week/month).
-    function proasAggregate(rows, gran, wkProceeds){
-      const m = new Map();
-      for (const r of rows){
-        const b = roasBucket(r.day, gran);
-        let a = m.get(b.key);
-        if(!a){ a={ key:b.key, label:b.label, spend:0, hasSpend:false,
-          actual:0, projLow:0, projBase:0, projHigh:0, annualRenew:0,
-          weekly_p:0, annual_p:0, weekly_subs:0, weekly_alive:0, annual_subs:0, annual_on:0,
-          sumLiftW:0, wSum:0, sumPriceW:0, anyOwnPrice:false }; m.set(b.key,a); }
-        const lo = proasProjectDay(r,"low",wkProceeds), ba = proasProjectDay(r,"base",wkProceeds), hi = proasProjectDay(r,"high",wkProceeds);
-        a.actual += ba.actual;
-        a.projLow += lo.proj; a.projBase += ba.proj; a.projHigh += hi.proj;
-        a.annualRenew += ba.annualRenew;
-        a.weekly_p += r.weekly_p||0; a.annual_p += r.annual_p||0;
-        a.weekly_subs += r.weekly_subs||0; a.weekly_alive += r.weekly_alive||0;
-        a.annual_subs += r.annual_subs||0; a.annual_on += r.annual_on||0;
-        a.sumLiftW += ba.lift*(r.weekly_alive||0); a.wSum += (r.weekly_alive||0);
-        // display: alive-weighted price actually used (cohort's own, else app fallback)
-        const usedPrice = (r.wk_price>0 ? r.wk_price : (wkProceeds>0 ? wkProceeds : 0));
-        a.sumPriceW += usedPrice*(r.weekly_alive||0);
-        if (r.wk_price>0) a.anyOwnPrice = true;
-        if (r.spend != null){ a.spend += r.spend; a.hasSpend = true; }
+    // Projected CUMULATIVE proceeds for one cohort-day up to targetAgeDays (base scenario). Used to
+    // build the chart's projected Dx points (D30/D60/D90/D180/D365) — same model as proasProjectDay
+    // but the weekly tail is only summed through the target age, and the annual renewal (a wk52 lump)
+    // is only included once the target reaches ~1 year. Returns cumulative net proceeds by that age.
+    function proasCumToAge(r, wkProceeds, targetAgeDays){
+      const weekly_p = r.weekly_p||0, annual_p = r.annual_p||0;
+      const ageWk = Math.max(0, Math.round((r.ageDays||0)/7));
+      const targetWk = Math.min(WK_HORIZON, Math.round(targetAgeDays/7));
+      const sNow = WK_SURVIVAL[Math.min(ageWk, WK_HORIZON)] || 0.028;
+      let lift = 1.0;
+      if (r.weekly_subs>0 && ageWk>=1 && sNow>0){
+        const aliveShare = (r.weekly_alive||0)/r.weekly_subs;
+        lift = Math.max(0.6, Math.min(1.6, aliveShare/sNow));
       }
-      const out=[...m.values()].sort((x,y)=>x.key<y.key?1:-1);
-      for(const a of out){
-        a.weeklyTail = a.projBase - a.actual - a.annualRenew;
-        a.avgLift = a.wSum>0 ? a.sumLiftW/a.wSum : 1.0;
-        a.wkPriceUsed = a.wSum>0 ? a.sumPriceW/a.wSum : (wkProceeds||0);
-        a.annualRate = a.annual_p>0 ? a.annualRenew/a.annual_p : 0;
-        const sp = a.spend;
-        a.roasNow  = a.hasSpend && sp>0 ? a.actual/sp   : null;
-        a.pRoas    = a.hasSpend && sp>0 ? a.projBase/sp : null;
-        a.pRoasLow = a.hasSpend && sp>0 ? a.projLow/sp  : null;
-        a.pRoasHigh= a.hasSpend && sp>0 ? a.projHigh/sp : null;
+      let cum = weekly_p + annual_p; // banked so far
+      // weekly tail only for future weeks up to the target age
+      const price = (r.wk_price>0 ? r.wk_price : (wkProceeds>0 ? wkProceeds : 0));
+      if ((r.weekly_alive||0)>0 && sNow>0 && price>0 && targetWk>ageWk){
+        for(let w=ageWk+1; w<=targetWk; w++){
+          const fFwd = Math.pow(Math.min(1,(WK_SURVIVAL[w]||0)/sNow), 1/lift);
+          cum += r.weekly_alive * price * fFwd;
+        }
       }
-      return out;
+      // annual renewal only lands at ~1 year
+      if (targetAgeDays >= 364){
+        const aw = Math.min(52, Math.max(0, ageWk));
+        const obsUnsub = r.annual_subs>0 ? 1 - ((r.annual_on||0)/r.annual_subs) : null;
+        const pooledNow = ANNUAL_UNSUB[aw] || ANNUAL_UNSUB_WK52;
+        let ratio = 1.0;
+        if (obsUnsub != null && pooledNow>0) ratio = Math.max(0.70, Math.min(1.1, obsUnsub/pooledNow));
+        const unsub52 = Math.min(0.97, ANNUAL_UNSUB_WK52 * ratio);
+        cum += annual_p * Math.max(0, (1-unsub52)*(1-0.20));
+      }
+      return cum;
     }
-    function pRoasColorPct(r){ return r==null?"":roasColor(r*100); }
 
-    function renderProas(){
-      const container = document.getElementById("container");
-      const appBtns = PROAS_APPS.map(([id,name]) => '<button class="filter-btn '+(id===proasApp?"active":"")+'" onclick="setProasApp(\''+id+'\')">'+name+'</button>').join("");
-      const geoBtns = PROAS_GEOS.map(([g,name]) => '<button class="pf-range-btn '+(g===proasGeo?"active":"")+'" onclick="setProasGeo(\''+g+'\')">'+name+'</button>').join("");
-      const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) => '<button class="pf-range-btn '+(g===proasGran?"active":"")+'" onclick="setProasGran(\''+g+'\')">'+name+'</button>').join("");
-      const d = proasData[proasKey()];
-      const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
-      const header = '<div class="pf-head"><div><div class="pf-m-label">pROAS · projected to 1 year</div>'+
-        (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>'+
-        '<div class="ch-filters"><div class="pf-ranges">'+geoBtns+'</div><div class="pf-ranges">'+granBtns+'</div></div></div>'+
-        '<div class="ch-appbar">'+appBtns+'</div>';
-
-      if (!d && proasInflight[proasKey()]) { container.innerHTML = header + '<div class="loading">Loading pROAS…</div>'; return; }
-      if (proasError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load pROAS</h2><p>'+proasError+'</p></div>'; return; }
-      if (!d) { container.innerHTML = header + '<div class="loading">Loading pROAS…</div>'; return; }
-
-      const wkProceeds = typeof d.weeklyProceeds === "number" ? d.weeklyProceeds : null;
-      const buckets = proasAggregate(d.rows||[], proasGran, wkProceeds);
-      const periodCol = proasGran==="month"?"Month":proasGran==="week"?"Week":"Install day";
-      const bodyRows = buckets.map(b => {
-        const sel = b.key===proasSelected ? ' style="background:#12352c"' : '';
-        return '<tr onclick="selectProas(\''+b.key+'\')" style="cursor:pointer"'+sel+'>'+
-          '<td class="pf-t-app">'+b.label+'</td>'+
-          '<td class="pf-t-num r">'+fmtMoney(b.actual)+'</td>'+
-          '<td class="pf-t-num r">'+fmtMoney(b.projBase)+'</td>'+
-          '<td class="pf-t-num r">'+(b.hasSpend?fmtMoney(b.spend):'<span class="dim">—</span>')+'</td>'+
-          roasCell(b.roasNow!=null?b.roasNow*100:null)+
-          '<td class="pf-t-num r" style="color:'+pRoasColorPct(b.pRoas)+';font-weight:600">'+
-            (b.pRoas!=null?Math.round(b.pRoas*100)+'%':'<span class="dim">—</span>')+
-            (b.pRoasLow!=null?'<div class="pf-band">'+Math.round(b.pRoasLow*100)+'–'+Math.round(b.pRoasHigh*100)+'%</div>':'')+
-          '</td></tr>';
-      }).join("");
-      const table = '<div class="pf-apps"><h3>By '+(proasGran==="day"?"install day":proasGran)+' · install cohort</h3><table class="pf-table"><thead><tr>'+
-        '<th>'+periodCol+'</th><th class="r">Proceeds</th><th class="r">1Y pProceeds</th><th class="r">Spend</th><th class="r">ROAS now</th><th class="r">1Y pROAS<div class="pf-band" style="font-weight:400">base · worst–best</div></th>'+
-        '</tr></thead><tbody>'+bodyRows+'</tbody></table>'+
-        '<div class="ch-foot">Observed proceeds = net of refunds, install-day cohort (matches ROAS tab). 1Y projection = weekly renewals (survival curve) + annual renewal (auto-renew-off intent × 20% billing). Annual renewal is modeled from intent — no cohort has reached its 1-yr renewal yet. Click a row for detail.</div></div>';
-
-      // detail panel for selected bucket
-      let detail = '';
-      const b = buckets.find(x=>x.key===proasSelected);
-      if (b){
-        const onPct = b.annual_subs>0?Math.round(b.annual_on/b.annual_subs*100):0;
-        const aliveP = b.weekly_subs>0?Math.round(b.weekly_alive/b.weekly_subs*100):0;
-        const aShare = b.actual>0?Math.round(b.annual_p/(b.weekly_p+b.annual_p)*100):0;
-        detail = '<div class="pf-apps" style="margin-top:16px"><h3>'+b.label+' — projection detail</h3>'+
-          '<table class="pf-table"><tbody>'+
-          '<tr><td class="pf-t-app">Observed proceeds</td><td class="pf-t-num r">'+fmtMoney(b.actual)+'</td></tr>'+
-          '<tr><td class="pf-t-app">+ Weekly renewal tail (→wk52)</td><td class="pf-t-num r">'+fmtMoney(b.weeklyTail)+'</td></tr>'+
-          '<tr><td class="pf-t-app">+ Annual renewal ('+Math.round(b.annualRate*100)+'% eff.)</td><td class="pf-t-num r">'+fmtMoney(b.annualRenew)+'</td></tr>'+
-          '<tr><td class="pf-t-app" style="font-weight:600">Projected value (1yr · base)</td><td class="pf-t-num r" style="font-weight:600">'+fmtMoney(b.projBase)+'</td></tr>'+
-          '<tr><td class="pf-t-app">Range (worst – best)</td><td class="pf-t-num r">'+fmtMoney(b.projLow)+' – '+fmtMoney(b.projHigh)+'</td></tr>'+
-          (b.hasSpend?'<tr><td class="pf-t-app">Spend</td><td class="pf-t-num r">'+fmtMoney(b.spend)+'</td></tr>'+
-          '<tr><td class="pf-t-app" style="font-weight:600">1Y pROAS</td><td class="pf-t-num r" style="font-weight:600;color:'+pRoasColorPct(b.pRoas)+'">'+(b.pRoas!=null?Math.round(b.pRoas*100)+'%':'—')+(b.pRoasLow!=null?' <span class="dim" style="font-weight:400">('+Math.round(b.pRoasLow*100)+'–'+Math.round(b.pRoasHigh*100)+'%)</span>':'')+'</td></tr>':'')+
-          '</tbody></table>'+
-          '<div class="ch-sub" style="margin-top:10px">Subscriber base: <b>'+b.annual_subs+'</b> annual ('+onPct+'% still auto-renew on), <b>'+b.weekly_subs+'</b> weekly ('+aliveP+'% still paying). Annual = '+aShare+'% of proceeds — drives most of the projection. Retention lift vs baseline curve: <b>'+b.avgLift.toFixed(2)+'×</b>.</div>'+
-          ((b.wkPriceUsed>0)
-            ? '<div class="ch-sub" style="margin-top:6px;opacity:.7">Weekly renewals priced at <b>'+fmtMoney(b.wkPriceUsed)+'</b> '+
-              (b.anyOwnPrice?"(this cohort’s own plan mix, from the price each sub paid)":"(app-wide fallback)")+
-              '. We run several weekly plans at different prices, so each cohort is priced from what it actually bought.</div>'
-            : '<div class="ch-sub" style="margin-top:6px;color:#e0a800">No weekly price available — weekly tail not projected for this cohort.</div>')+
-          '<div class="ch-sub" style="margin-top:6px;opacity:.7">Band flexes billing-failure (12–30%), weekly renewal (±15%) and annual auto-renew-off intent (±10%). No annual cohort has reached its 1-yr renewal yet — the annual piece is modeled.</div>'+
-          '</div>';
-      }
-      container.innerHTML = header + table + detail;
-    }
 
     window.copyTxId = function(fullId, el, ev) {
       if (ev) ev.stopPropagation();
