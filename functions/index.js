@@ -1540,12 +1540,26 @@ WITH anchors AS (
     ${geoRevFilter}
   GROUP BY otid
 ),
-death AS (
-  -- a subscription is "dead" (won't keep paying) if it hit any real loss signal, incl. billing.
-  SELECT DISTINCT originalTransactionId AS otid
+state AS (
+  -- Effective CURRENT state per subscription, one row per otid (no join inflation). We compare
+  -- event *timestamps*, not mere existence, so recovered subs are not permanently marked dead:
+  --   last_loss  = latest real loss signal (expiration / cancellation / billing_issue / BILLING_ERROR)
+  --   last_paid  = latest SUCCESSFUL paid event (positive-price, non-refund purchase/renewal)
+  --   max_exp    = latest paid-entitlement expiry (expirationAt), i.e. how long they're paid through
+  -- A weekly sub counts as still-paying ("alive") if ANY of:
+  --   (a) it never had a loss signal, OR
+  --   (b) it made a successful paid event AFTER its latest loss (billing recovered / re-subscribed), OR
+  --   (c) it is still inside a paid entitlement period (max_exp > now) — e.g. auto-renew off but the
+  --       already-paid week hasn't ended yet.
+  -- Refunded / zero-price events never count as a recovery. expirationAt is populated for most subs;
+  -- where it is NULL, (a)/(b) still classify correctly (fallback to the recovery-chain rule).
+  SELECT originalTransactionId AS otid,
+    maxIf(purchasedAt, name IN ('expiration','cancellation','billing_issue') OR cancelReason = 'BILLING_ERROR') AS last_loss,
+    maxIf(purchasedAt, name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) AS last_paid,
+    maxIf(expirationAt, name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) AS max_exp
   FROM open_revenue.attributed_events_by_ts_rep
   WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
-    AND (name IN ('expiration','cancellation','billing_issue') OR cancelReason = 'BILLING_ERROR')
+  GROUP BY otid
 ),
 unsub AS (
   -- explicit auto-renew-off (the annual renewal-intent signal).
@@ -1565,13 +1579,19 @@ proceeds AS (
 )
 SELECT toString(a.cohort_day) AS day,
   countIf(a.plan = 'weekly') AS weekly_subs,
-  countIf(a.plan = 'weekly' AND d.otid = '') AS weekly_alive,
+  -- weekly_alive: never lost (last_loss is epoch default) OR recovered after latest loss OR still
+  -- inside a paid entitlement period. Cannot exceed weekly_subs (it's a subset of the same rows).
+  countIf(a.plan = 'weekly' AND (
+    s.last_loss = toDateTime64(0, 6, 'UTC')
+    OR s.last_paid > s.last_loss
+    OR s.max_exp > now()
+  )) AS weekly_alive,
   countIf(a.plan = 'annual') AS annual_subs,
   countIf(a.plan = 'annual' AND u.otid = '') AS annual_on,
   round(sumIf(pr.net, a.plan = 'weekly'), 2) AS weekly_p,
   round(sumIf(pr.net, a.plan = 'annual'), 2) AS annual_p
 FROM anchors a
-LEFT JOIN death d ON a.otid = d.otid
+LEFT JOIN state s ON a.otid = s.otid
 LEFT JOIN unsub u ON a.otid = u.otid
 LEFT JOIN proceeds pr ON a.otid = pr.otid
 GROUP BY a.cohort_day
