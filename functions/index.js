@@ -1156,6 +1156,17 @@ async function runCohortSync() {
       } catch (e) {
         results.failed.push(`roas ${appId}/${geo}: ${e.message}`);
       }
+      // pROAS projection inputs (separate doc + tab; shares spend synced above)
+      try {
+        const pdata = await fetchProasCohorts(appId, geo);
+        await db.collection("proas_cohorts").doc(`${appId}__${geo}`).set({
+          payload: JSON.stringify(pdata),
+          generatedAt: nowIso,
+        });
+        results.proas = (results.proas || 0) + 1;
+      } catch (e) {
+        results.failed.push(`proas ${appId}/${geo}: ${e.message}`);
+      }
     }
   }
   return results;
@@ -1501,6 +1512,147 @@ functions.http("roasCohorts", async (req, res) => {
     return res.status(200).json(data);
   } catch (err) {
     console.error("roasCohorts error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- pROAS cohort inputs ----
+// Projection-input layer for the pROAS tab. Same install-day cohort basis as fetchRoasCohorts, but
+// per cohort-day it also emits the plan split (weekly vs annual), subscriber counts, and the
+// leading churn signals the forward projection needs: weekly subs still paying, annual subs still
+// auto-renew-on. The tab computes the actual projection (survival + intent curves) client-side —
+// this function stays ratio-free / model-free, like roasCohorts. Observed ROAS in the tab is
+// derived from these same net-proceeds numbers, so it reconciles 1:1 with the ROAS tab.
+async function fetchProasCohorts(appId, geo) {
+  const g = ROAS_GEOS.includes(geo) ? geo : "all";
+  const geoRevFilter = g === "all" ? "" : `AND countryCode = '${g}'`;
+
+  const sql = `
+WITH anchors AS (
+  -- install-day cohort + plan classification (annual/year keyword -> annual, else weekly),
+  -- matching fetchRoasCohorts' install-day anchor and fetchChurnCohorts' plan split.
+  SELECT originalTransactionId AS otid,
+    toDate(toTimeZone(coalesce(min(installDate), min(purchasedAt)), '${ROAS_TZ}')) AS cohort_day,
+    if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS plan
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+    ${geoRevFilter}
+  GROUP BY otid
+),
+death AS (
+  -- a subscription is "dead" (won't keep paying) if it hit any real loss signal, incl. billing.
+  SELECT DISTINCT originalTransactionId AS otid
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND (name IN ('expiration','cancellation','billing_issue') OR cancelReason = 'BILLING_ERROR')
+),
+unsub AS (
+  -- explicit auto-renew-off (the annual renewal-intent signal).
+  SELECT DISTINCT originalTransactionId AS otid
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND cancelReason = 'UNSUBSCRIBE'
+),
+proceeds AS (
+  -- cumulative net proceeds per subscription (paid names plus refunds, refunds negated).
+  SELECT originalTransactionId AS otid,
+    sum(if(isRefund = 1, -abs(toFloat64(proceeds)), toFloat64(proceeds))) AS net
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0
+    AND (name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') OR isRefund = 1)
+  GROUP BY otid
+)
+SELECT toString(a.cohort_day) AS day,
+  countIf(a.plan = 'weekly') AS weekly_subs,
+  countIf(a.plan = 'weekly' AND d.otid = '') AS weekly_alive,
+  countIf(a.plan = 'annual') AS annual_subs,
+  countIf(a.plan = 'annual' AND u.otid = '') AS annual_on,
+  round(sumIf(pr.net, a.plan = 'weekly'), 2) AS weekly_p,
+  round(sumIf(pr.net, a.plan = 'annual'), 2) AS annual_p
+FROM anchors a
+LEFT JOIN death d ON a.otid = d.otid
+LEFT JOIN unsub u ON a.otid = u.otid
+LEFT JOIN proceeds pr ON a.otid = pr.otid
+GROUP BY a.cohort_day
+HAVING toDate(a.cohort_day) >= today() - ${ROAS_WINDOW_DAYS}
+ORDER BY a.cohort_day DESC
+FORMAT JSONEachRow`.trim();
+
+  const rows0 = await swQuery(sql);
+
+  const spendSnap = await db.collection("ad_spend")
+    .where("applicationId", "==", Number(appId))
+    .where("geo", "==", g)
+    .get();
+  const spendByDate = new Map();
+  spendSnap.forEach((d) => {
+    const v = d.data();
+    if (v && v.date) spendByDate.set(v.date, Number(v.spend_usd || 0));
+  });
+
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: ROAS_TZ }).format(new Date());
+  const todayMs = Date.parse(todayKey + "T00:00:00Z");
+
+  const rows = rows0.map((r) => {
+    const day = r.day;
+    const ageDays = Math.floor((todayMs - Date.parse(day + "T00:00:00Z")) / 86400000);
+    const spend = spendByDate.get(day);
+    const hasSpend = typeof spend === "number" && spend > 0;
+    return {
+      day,
+      ageDays,
+      spend: hasSpend ? Math.round(spend * 100) / 100 : null,
+      weekly_p: Number(r.weekly_p) || 0,
+      annual_p: Number(r.annual_p) || 0,
+      proceeds: (Number(r.weekly_p) || 0) + (Number(r.annual_p) || 0), // net, matches roasCohorts basis
+      weekly_subs: Number(r.weekly_subs) || 0,
+      weekly_alive: Number(r.weekly_alive) || 0,
+      annual_subs: Number(r.annual_subs) || 0,
+      annual_on: Number(r.annual_on) || 0,
+    };
+  });
+
+  return {
+    appId: Number(appId),
+    appName: ROAS_APP_NAMES[Number(appId)] || String(appId),
+    geo: g,
+    tz: ROAS_TZ,
+    windowDays: ROAS_WINDOW_DAYS,
+    rows,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+functions.http("pRoasCohorts", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://localhost:8899",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
+    const appIdRaw = req.query.appId;
+    if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) return res.status(400).json({ error: "appId required" });
+    const geo = ROAS_GEOS.includes(String(req.query.geo)) ? String(req.query.geo) : "all";
+    const data = await fetchProasCohorts(Number(appIdRaw), geo);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("pRoasCohorts error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
