@@ -1560,6 +1560,10 @@ async function fetchProasCohorts(appId, geo) {
 WITH anchors AS (
   -- install-day cohort + plan classification (annual/year keyword -> annual, else weekly),
   -- matching fetchRoasCohorts' install-day anchor and fetchChurnCohorts' plan split.
+  -- Only real PAYING subs count: we require at least one positive-price, non-refund paid event.
+  -- This drops billing-failed initial_purchase ghosts (a $0 initial_purchase whose charge failed —
+  -- ~76% of annual, ~26% of weekly "subs"), which otherwise inflate the sub counts and the on/alive
+  -- rates. Their $0 never contributed proceeds anyway, so cohort dollars are unchanged.
   SELECT originalTransactionId AS otid,
     toDate(toTimeZone(coalesce(min(installDate), min(purchasedAt)), '${ROAS_TZ}')) AS cohort_day,
     if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS plan
@@ -1568,6 +1572,7 @@ WITH anchors AS (
     AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
     ${geoRevFilter}
   GROUP BY otid
+  HAVING countIf(name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) > 0
 ),
 state AS (
   -- Effective CURRENT state per subscription, one row per otid (no join inflation). We compare
