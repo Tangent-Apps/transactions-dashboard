@@ -1156,6 +1156,17 @@ async function runCohortSync() {
       } catch (e) {
         results.failed.push(`roas ${appId}/${geo}: ${e.message}`);
       }
+      // pROAS projection inputs (separate doc + tab; shares spend synced above)
+      try {
+        const pdata = await fetchProasCohorts(appId, geo);
+        await db.collection("proas_cohorts").doc(`${appId}__${geo}`).set({
+          payload: JSON.stringify(pdata),
+          generatedAt: nowIso,
+        });
+        results.proas = (results.proas || 0) + 1;
+      } catch (e) {
+        results.failed.push(`proas ${appId}/${geo}: ${e.message}`);
+      }
     }
   }
   return results;
@@ -1501,6 +1512,243 @@ functions.http("roasCohorts", async (req, res) => {
     return res.status(200).json(data);
   } catch (err) {
     console.error("roasCohorts error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- pROAS cohort inputs ----
+// Projection-input layer for the pROAS tab. Same install-day cohort basis as fetchRoasCohorts, but
+// per cohort-day it also emits the plan split (weekly vs annual), subscriber counts, and the
+// leading churn signals the forward projection needs: weekly subs still paying, annual subs still
+// auto-renew-on. The tab computes the actual projection (survival + intent curves) client-side —
+// Expected NET proceeds per successful weekly renewal, learned per app (+ geo) from recent
+// history — replaces the old global $6.32 flat assumption, which overstated GirlWalk US by ~16%
+// and GirlTalk/PolyAI by ~35%. Uses only real weekly renewals (name='renewal', positive-price,
+// non-refund, productId matching week/weekly), nets out weekly refunds in the same window, over a
+// recent 90-day window. Fallback: app+geo (>= min sample) -> app+all -> null (no weekly tail
+// projected rather than a misleading one). Never falls back to a hardcoded price.
+const WEEKLY_PROCEEDS_WINDOW_DAYS = 90;
+const WEEKLY_PROCEEDS_MIN_SAMPLE = 30;
+async function weeklyProceedsEstimate(appId, geo) {
+  const geoFilter = geo === "all" ? "" : `AND countryCode = '${geo}'`;
+  const sql = `
+SELECT
+  countIf(name='renewal' AND isRefund=0 AND toFloat64(proceeds)>0 AND productId ILIKE '%week%') AS n,
+  sumIf(toFloat64(proceeds), name='renewal' AND isRefund=0 AND toFloat64(proceeds)>0 AND productId ILIKE '%week%') AS gross,
+  sumIf(abs(toFloat64(proceeds)), isRefund=1 AND productId ILIKE '%week%') AS refunds
+FROM open_revenue.attributed_events_by_ts_rep
+WHERE applicationId = ${Number(appId)} AND isSandbox = 0
+  AND purchasedAt >= now() - INTERVAL ${WEEKLY_PROCEEDS_WINDOW_DAYS} DAY
+  ${geoFilter}
+FORMAT JSONEachRow`.trim();
+  const r = (await swQuery(sql))[0] || {};
+  const n = Number(r.n) || 0;
+  if (n < WEEKLY_PROCEEDS_MIN_SAMPLE) return null;
+  // refund-adjusted mean net per renewal (refunds reduce the numerator, count stays as the denom)
+  const mean = (Number(r.gross || 0) - Number(r.refunds || 0)) / n;
+  if (!(mean > 0)) return null;
+  return { value: Math.round(mean * 1000) / 1000, n };
+}
+
+// this function stays ratio-free / model-free, like roasCohorts. Observed ROAS in the tab is
+// derived from these same net-proceeds numbers, so it reconciles 1:1 with the ROAS tab.
+async function fetchProasCohorts(appId, geo) {
+  const g = ROAS_GEOS.includes(geo) ? geo : "all";
+  const geoRevFilter = g === "all" ? "" : `AND countryCode = '${g}'`;
+
+  const sql = `
+WITH anchors AS (
+  -- install-day cohort + plan classification (annual/year keyword -> annual, else weekly),
+  -- matching fetchRoasCohorts' install-day anchor and fetchChurnCohorts' plan split.
+  -- Only real PAYING subs count: we require at least one positive-price, non-refund paid event.
+  -- This drops billing-failed initial_purchase ghosts (a $0 initial_purchase whose charge failed —
+  -- ~76% of annual, ~26% of weekly "subs"), which otherwise inflate the sub counts and the on/alive
+  -- rates. Their $0 never contributed proceeds anyway, so cohort dollars are unchanged.
+  SELECT originalTransactionId AS otid,
+    toDate(toTimeZone(coalesce(min(installDate), min(purchasedAt)), '${ROAS_TZ}')) AS cohort_day,
+    if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS plan
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+    ${geoRevFilter}
+  GROUP BY otid
+  HAVING countIf(name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) > 0
+),
+state AS (
+  -- Effective CURRENT state per subscription, one row per otid (no join inflation). We compare
+  -- event *timestamps*, not mere existence, so recovered subs are not permanently marked dead:
+  --   last_loss  = latest real loss signal (expiration / cancellation / billing_issue / BILLING_ERROR)
+  --   last_paid  = latest SUCCESSFUL paid event (positive-price, non-refund purchase/renewal)
+  --   max_exp    = latest paid-entitlement expiry (expirationAt), i.e. how long they're paid through
+  -- A weekly sub counts as still-paying ("alive") if ANY of:
+  --   (a) it never had a loss signal, OR
+  --   (b) it made a successful paid event AFTER its latest loss (billing recovered / re-subscribed), OR
+  --   (c) it is still inside a paid entitlement period (max_exp > now) — e.g. auto-renew off but the
+  --       already-paid week hasn't ended yet.
+  -- Refunded / zero-price events never count as a recovery. expirationAt is populated for most subs;
+  -- where it is NULL, (a)/(b) still classify correctly (fallback to the recovery-chain rule).
+  SELECT originalTransactionId AS otid,
+    maxIf(purchasedAt, name IN ('expiration','cancellation','billing_issue') OR cancelReason = 'BILLING_ERROR') AS last_loss,
+    maxIf(purchasedAt, name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) AS last_paid,
+    maxIf(expirationAt, name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) AS max_exp
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+  GROUP BY otid
+),
+unsub AS (
+  -- explicit auto-renew-off (the annual renewal-intent signal).
+  SELECT DISTINCT originalTransactionId AS otid
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND cancelReason = 'UNSUBSCRIBE'
+),
+proceeds AS (
+  -- cumulative net proceeds per subscription (paid names plus refunds, refunds negated).
+  SELECT originalTransactionId AS otid,
+    sum(if(isRefund = 1, -abs(toFloat64(proceeds)), toFloat64(proceeds))) AS net
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0
+    AND (name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') OR isRefund = 1)
+  GROUP BY otid
+),
+wprice AS (
+  -- Per-subscription WEEKLY recurring price = the sub's FIRST positive-price WEEKLY charge. We sell
+  -- several weekly plans at different prices (weekly.6 ~\$5.1, weekly.9 ~\$7.6, ...), so a cohort's
+  -- future renewals must be priced from the plan THAT cohort actually bought, not a blended average.
+  -- No trial anymore, so for post-trial subs the initial_purchase price IS the renewal price; for
+  -- legacy trial-era subs the first positive charge is the day-3 trial conversion (labelled
+  -- 'renewal'), likewise their true recurring price. argMin by purchasedAt captures both.
+  -- productId must match weekly: a sub that started weekly then switched to annual (or a Stripe/web
+  -- product with a different price format) must NOT contaminate the weekly price. One row per otid.
+  SELECT originalTransactionId AS otid,
+    argMin(toFloat64(proceeds), purchasedAt) AS first_price
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+    AND isRefund = 0 AND toFloat64(proceeds) > 0 AND productId ILIKE '%week%'
+  GROUP BY otid
+)
+SELECT toString(a.cohort_day) AS day,
+  countIf(a.plan = 'weekly') AS weekly_subs,
+  -- weekly_alive: never lost (last_loss is epoch default) OR recovered after latest loss OR still
+  -- inside a paid entitlement period. Cannot exceed weekly_subs (it's a subset of the same rows).
+  countIf(a.plan = 'weekly' AND (
+    s.last_loss = toDateTime64(0, 6, 'UTC')
+    OR s.last_paid > s.last_loss
+    OR s.max_exp > now()
+  )) AS weekly_alive,
+  countIf(a.plan = 'annual') AS annual_subs,
+  countIf(a.plan = 'annual' AND u.otid = '') AS annual_on,
+  round(sumIf(pr.net, a.plan = 'weekly'), 2) AS weekly_p,
+  round(sumIf(pr.net, a.plan = 'annual'), 2) AS annual_p,
+  -- this cohort's weekly renewal price, averaged over the STILL-ALIVE weekly subs (they're the ones
+  -- whose renewals we project, and higher-price plans retain better, so alive-only is more accurate
+  -- than all-subs). Plus the min/max weekly price in the cohort for an honest display range. Priced
+  -- from each sub's own weekly first-charge, so the per-plan spread is preserved, not blended away.
+  countIf(a.plan = 'weekly' AND wp.first_price > 0 AND (s.last_loss = toDateTime64(0,6,'UTC') OR s.last_paid > s.last_loss OR s.max_exp > now())) AS wk_price_n,
+  round(avgIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0 AND (s.last_loss = toDateTime64(0,6,'UTC') OR s.last_paid > s.last_loss OR s.max_exp > now())), 3) AS wk_renew_price,
+  round(minIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0), 2) AS wk_price_min,
+  round(maxIf(wp.first_price, a.plan = 'weekly' AND wp.first_price > 0), 2) AS wk_price_max
+FROM anchors a
+LEFT JOIN state s ON a.otid = s.otid
+LEFT JOIN unsub u ON a.otid = u.otid
+LEFT JOIN proceeds pr ON a.otid = pr.otid
+LEFT JOIN wprice wp ON a.otid = wp.otid
+GROUP BY a.cohort_day
+HAVING toDate(a.cohort_day) >= today() - ${ROAS_WINDOW_DAYS}
+ORDER BY a.cohort_day DESC
+FORMAT JSONEachRow`.trim();
+
+  const rows0 = await swQuery(sql);
+
+  const spendSnap = await db.collection("ad_spend")
+    .where("applicationId", "==", Number(appId))
+    .where("geo", "==", g)
+    .get();
+  const spendByDate = new Map();
+  spendSnap.forEach((d) => {
+    const v = d.data();
+    if (v && v.date) spendByDate.set(v.date, Number(v.spend_usd || 0));
+  });
+
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: ROAS_TZ }).format(new Date());
+  const todayMs = Date.parse(todayKey + "T00:00:00Z");
+
+  const rows = rows0.map((r) => {
+    const day = r.day;
+    const ageDays = Math.floor((todayMs - Date.parse(day + "T00:00:00Z")) / 86400000);
+    const spend = spendByDate.get(day);
+    const hasSpend = typeof spend === "number" && spend > 0;
+    return {
+      day,
+      ageDays,
+      spend: hasSpend ? Math.round(spend * 100) / 100 : null,
+      weekly_p: Number(r.weekly_p) || 0,
+      annual_p: Number(r.annual_p) || 0,
+      proceeds: (Number(r.weekly_p) || 0) + (Number(r.annual_p) || 0), // net, matches roasCohorts basis
+      weekly_subs: Number(r.weekly_subs) || 0,
+      weekly_alive: Number(r.weekly_alive) || 0,
+      annual_subs: Number(r.annual_subs) || 0,
+      annual_on: Number(r.annual_on) || 0,
+      wk_price: Number(r.wk_renew_price) || 0,   // alive-weighted mean weekly recurring price (0 = none alive)
+      wk_price_n: Number(r.wk_price_n) || 0,
+      wk_price_min: Number(r.wk_price_min) || 0, // cohort's weekly price spread, for display
+      wk_price_max: Number(r.wk_price_max) || 0,
+    };
+  });
+
+  // expected weekly-renewal net proceeds: app+geo, fall back to app+all, else null (no tail).
+  let wp = await weeklyProceedsEstimate(Number(appId), g);
+  let wpSource = wp ? (g === "all" ? "app" : "app_geo") : null;
+  if (!wp && g !== "all") {
+    wp = await weeklyProceedsEstimate(Number(appId), "all");
+    wpSource = wp ? "app_fallback" : null;
+  }
+
+  return {
+    appId: Number(appId),
+    appName: ROAS_APP_NAMES[Number(appId)] || String(appId),
+    geo: g,
+    tz: ROAS_TZ,
+    windowDays: ROAS_WINDOW_DAYS,
+    weeklyProceeds: wp ? wp.value : null,
+    weeklyProceedsN: wp ? wp.n : 0,
+    weeklyProceedsSource: wpSource,
+    weeklyProceedsWindowDays: WEEKLY_PROCEEDS_WINDOW_DAYS,
+    rows,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+functions.http("pRoasCohorts", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://localhost:8899",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
+    const appIdRaw = req.query.appId;
+    if (!appIdRaw || !/^\d+$/.test(String(appIdRaw))) return res.status(400).json({ error: "appId required" });
+    const geo = ROAS_GEOS.includes(String(req.query.geo)) ? String(req.query.geo) : "all";
+    const data = await fetchProasCohorts(Number(appIdRaw), geo);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("pRoasCohorts error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });

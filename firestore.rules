@@ -25,5 +25,9 @@ service cloud.firestore {
       allow read: if request.auth != null && request.auth.token.dashboard == true;
       allow write: if false;
     }
+    match /proas_cohorts/{doc} {
+      allow read: if request.auth != null && request.auth.token.dashboard == true;
+      allow write: if false;
+    }
   }
 }
