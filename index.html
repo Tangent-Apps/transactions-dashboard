@@ -1305,17 +1305,25 @@
             weekly_p=0, annual_p=0, weekly_subs=0, weekly_alive=0, annual_subs=0, annual_on=0,
             sumLiftW=0, wSum=0, sumPriceW=0, pMin=Infinity, pMax=0, anyOwnPrice=false;
         for (const r of rs) {
-          const lo=proasProjectDay(r,"low",wkMean), ba=proasProjectDay(r,"base",wkMean), hi=proasProjectDay(r,"high",wkMean);
-          base+=ba.proj; low+=lo.proj; high+=hi.proj; annualRenew+=ba.annualRenew; actual+=ba.actual;
+          // ROAS-bearing sums (projection dollars + observed proceeds) must come from the SAME
+          // days that contribute spend to the denominator — else a day whose Adjust spend hasn't
+          // reported yet (spend==null, always true for "today") drops its cost but keeps its
+          // projected/observed revenue, inflating pROAS. Mirror the observed side (roasAggregate),
+          // which only sums proceeds on non-null-spend days. Sub counts / price stay all-days
+          // (descriptive, like observed 'buyers').
+          if (r.spend!=null){
+            const lo=proasProjectDay(r,"low",wkMean), ba=proasProjectDay(r,"base",wkMean), hi=proasProjectDay(r,"high",wkMean);
+            base+=ba.proj; low+=lo.proj; high+=hi.proj; annualRenew+=ba.annualRenew; actual+=ba.actual;
+            spend+=r.spend; hasSpend=true;
+          }
           weekly_p+=r.weekly_p||0; annual_p+=r.annual_p||0;
           weekly_subs+=r.weekly_subs||0; weekly_alive+=r.weekly_alive||0;
           annual_subs+=r.annual_subs||0; annual_on+=r.annual_on||0;
-          sumLiftW+=ba.lift*(r.weekly_alive||0); wSum+=(r.weekly_alive||0);
+          sumLiftW+=proasProjectDay(r,"base",wkMean).lift*(r.weekly_alive||0); wSum+=(r.weekly_alive||0);
           const price=(r.wk_price>0?r.wk_price:(wkMean>0?wkMean:0)); sumPriceW+=price*(r.weekly_alive||0);
           if (r.wk_price>0) anyOwnPrice=true;
           if (r.wk_price_min>0) pMin=Math.min(pMin, r.wk_price_min);
           if (r.wk_price_max>0) pMax=Math.max(pMax, r.wk_price_max);
-          if (r.spend!=null){ spend+=r.spend; hasSpend=true; }
         }
         out.set(key, {
           rs, spend, hasSpend, proj1y:base, projLow:low, projHigh:high, annualRenew, actual,
@@ -1326,7 +1334,8 @@
           // projected cumulative ROAS % at a milestone age (sum each cohort-day's cum-to-age / spend)
           projDx: (ageDays) => {
             if (!hasSpend || spend<=0) return null;
-            let c=0; for (const r of rs) c += proasCumToAge(r, wkMean, ageDays);
+            // only null-spend-excluded days, matching the spend denominator (see loop above)
+            let c=0; for (const r of rs) if (r.spend!=null) c += proasCumToAge(r, wkMean, ageDays);
             return (c/spend)*100;
           },
         });
