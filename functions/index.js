@@ -56,10 +56,8 @@ function resolveAppName(appId, productId) {
   if (id.includes("murder") || id.includes("mystery")) return "Murder Mystery";
   if (id.includes("reel") || id.includes("short_stories")) return "Reel Short Stories";
   if (id.includes("daily") && id.includes("prayer")) return "Daily Prayers";
-  // Stripe price IDs (web revenue, unmapped) — bucket together so dashboard isn't littered.
-  if (productId && (productId.startsWith("live:price_") || productId.startsWith("price_"))) {
-    return "Stripe Web";
-  }
+  // (Stripe web revenue is no longer routed through swWebhook — see the STRIPE-store
+  // skip in the handler and the dedicated stripeWebhook. No "Stripe Web" bucket.)
   if (productId) {
     const s = productId.split(".");
     return s.length > 2 ? s[2] : productId;
@@ -84,6 +82,13 @@ functions.http("swWebhook", async (req, res) => {
     const payload = req.body || {};
     const type = payload.type;
     const data = payload.data || {};
+
+    // Stripe is the sole source for web/Stripe revenue (handled by stripeWebhook,
+    // which writes real app_names + Poly iMessage). Ignore STRIPE-store events here
+    // so the same sale isn't written twice.
+    if ((data.store || "").toUpperCase() === "STRIPE") {
+      return res.status(200).send("Ignored (Stripe handled by stripeWebhook)");
+    }
 
     // Determine transaction type — skip events we don't care about
     let tt;
@@ -226,6 +231,191 @@ functions.http("swWebhook", async (req, res) => {
     return res.status(200).send("OK");
   } catch (err) {
     console.error("Webhook error:", err.message, err.stack);
+    return res.status(500).send("Error: " + err.message);
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Stripe webhook — web-checkout revenue (Stripe is the SOLE source for web/Stripe
+// sales; swWebhook ignores STRIPE-store Superwall events to avoid double counting).
+// Writes into the same `transactions` collection the Activity feed reads, using the
+// same doc shape as swWebhook so no dashboard change is needed.
+//
+// Subscribed events (configure the same set on the Stripe endpoint):
+//   invoice.paid      — first payment + renewals (billing_reason distinguishes)
+//   charge.refunded   — refunds (price negated)
+// Everything else is acknowledged (200) and ignored.
+
+// Stripe → dashboard mapping helpers live in ./stripeMap.js so the backfill script
+// (scripts/backfill-stripe.js) shares the exact same classification + app resolution.
+const { resolveStripeAppName, stripeInvoiceToTxType } = require("./stripeMap");
+
+let _stripeClient = null;
+function stripe() {
+  if (!_stripeClient) {
+    const Stripe = require("stripe");
+    _stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY);
+  }
+  return _stripeClient;
+}
+
+functions.http("stripeWebhook", async (req, res) => {
+  if (req.method !== "POST") return res.status(405).send("Not allowed");
+
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    console.error("stripeWebhook: missing STRIPE_WEBHOOK_SECRET");
+    return res.status(500).send("Missing webhook secret");
+  }
+
+  // Verify Stripe signature against the RAW body (functions-framework exposes rawBody).
+  let event;
+  try {
+    const sig = req.headers["stripe-signature"];
+    event = stripe().webhooks.constructEvent(req.rawBody, sig, secret);
+  } catch (err) {
+    console.warn("stripeWebhook signature verification failed:", err.message);
+    return res.status(400).send("Invalid signature");
+  }
+
+  try {
+    const obj = event.data.object;
+    let tt = null;
+    let priceUSD = 0;
+    let currency = "USD";
+    let priceLocal = 0;
+    let countryCode = "";
+    let productName = "";
+    let priceId = "";
+    let subId = "";
+    let customerId = typeof obj.customer === "string" ? obj.customer : "";
+    let metadata = {};
+    let purchasedAtMs = event.created ? event.created * 1000 : Date.now();
+    let dedupeKey = ""; // stable per money event; Stripe retries carry the same id
+
+    if (event.type === "invoice.paid" || event.type === "invoice.payment_succeeded") {
+      tt = stripeInvoiceToTxType(obj);
+      if (!tt) return res.status(200).send("Skip (zero/trial invoice)");
+      priceUSD = (obj.amount_paid || 0) / 100;
+      currency = (obj.currency || "usd").toUpperCase();
+      priceLocal = priceUSD; // Stripe invoice is already in its own currency; USD assumed (all live prices are USD)
+      subId = typeof obj.subscription === "string" ? obj.subscription : "";
+      const line = (obj.lines && obj.lines.data && obj.lines.data[0]) || {};
+      priceId = (line.price && line.price.id) || (line.plan && line.plan.id) || "";
+      // product name: prefer expanded product, else fetch it
+      let productId = (line.price && line.price.product) || (line.plan && line.plan.product) || "";
+      metadata = (obj.subscription_details && obj.subscription_details.metadata) || obj.metadata || {};
+      if (productId) {
+        try {
+          const prod = await stripe().products.retrieve(productId);
+          productName = prod && prod.name ? prod.name : "";
+        } catch (e) { console.warn("product fetch failed:", e.message); }
+      }
+      countryCode = (obj.account_country || "").toUpperCase();
+      purchasedAtMs = (obj.created || event.created) * 1000;
+      dedupeKey = obj.id || ("evt_" + event.id); // invoice id
+    } else if (event.type === "charge.refunded") {
+      tt = "refund";
+      priceUSD = -Math.abs((obj.amount_refunded || obj.amount || 0) / 100);
+      currency = (obj.currency || "usd").toUpperCase();
+      priceLocal = priceUSD;
+      customerId = typeof obj.customer === "string" ? obj.customer : customerId;
+      countryCode = ((obj.billing_details && obj.billing_details.address && obj.billing_details.address.country) || "").toUpperCase();
+      metadata = obj.metadata || {};
+      priceId = "";
+      // Try to attribute to the sub/product via the charge's invoice.
+      if (obj.invoice) {
+        try {
+          const inv = await stripe().invoices.retrieve(obj.invoice);
+          subId = typeof inv.subscription === "string" ? inv.subscription : "";
+          const line = (inv.lines && inv.lines.data && inv.lines.data[0]) || {};
+          priceId = (line.price && line.price.id) || (line.plan && line.plan.id) || "";
+          const productId = (line.price && line.price.product) || (line.plan && line.plan.product) || "";
+          metadata = (inv.subscription_details && inv.subscription_details.metadata) || metadata;
+          if (productId) {
+            const prod = await stripe().products.retrieve(productId);
+            productName = prod && prod.name ? prod.name : "";
+          }
+        } catch (e) { console.warn("refund invoice fetch failed:", e.message); }
+      }
+      purchasedAtMs = (obj.created || event.created) * 1000;
+      dedupeKey = obj.id || ("evt_" + event.id); // charge id
+    } else {
+      return res.status(200).send("Ignored");
+    }
+
+    const isSandbox = event.livemode === false;
+    const swInitiatingAppId = metadata._sw_initiating_application_id || metadata._sw_application_id || "";
+    const appName = resolveStripeAppName(swInitiatingAppId, productName);
+    // original_transaction_id: subscription id (mirrors otid — enables LTV rollup + dedupe)
+    const otid = subId || customerId || dedupeKey;
+    // app_user_id: prefer the app's own user id in metadata, else Stripe customer id
+    const appUserId = metadata.gw_uid || metadata._sw_app_user_id || customerId || "";
+
+    // Dedupe: Stripe retries webhooks. Skip if this (otid, dedupeKey, tt) already stored.
+    if (dedupeKey) {
+      try {
+        const dupSnap = await db.collection("transactions")
+          .where("stripe_dedupe_key", "==", dedupeKey)
+          .where("transaction_type", "==", tt)
+          .limit(1)
+          .get();
+        if (!dupSnap.empty) return res.status(200).send("Duplicate (already stored)");
+      } catch (e) { console.warn("stripe dedupe lookup failed:", e.message); }
+    }
+
+    // Lifetime spend for this subscription (keyed by otid), same logic as swWebhook.
+    let lifetimeSpend = null;
+    let lifetimePayments = null;
+    const PAID_TT = ["renewal", "new_subscription", "trial_to_paid", "one_time_purchase"];
+    if (PAID_TT.includes(tt) && otid) {
+      try {
+        const snap = await db.collection("transactions")
+          .where("original_transaction_id", "==", otid)
+          .where("is_sandbox", "==", isSandbox)
+          .limit(500)
+          .get();
+        let sum = 0, count = 0;
+        snap.forEach(d => {
+          const dd = d.data();
+          if (PAID_TT.includes(dd.transaction_type)) { sum += Number(dd.price || 0); count++; }
+          else if (dd.transaction_type === "refund") { sum -= Math.abs(Number(dd.price || 0)); }
+        });
+        sum += Number(priceUSD || 0);
+        count += 1;
+        lifetimeSpend = Math.round(sum * 100) / 100;
+        lifetimePayments = count;
+      } catch (e) { console.warn("stripe lifetime calc failed:", e.message); }
+    }
+
+    const tx = {
+      event_type: event.type,
+      transaction_type: tt,
+      app_name: appName,
+      product_id: priceId || productName || "",
+      price: priceUSD,                                   // USD
+      proceeds: priceUSD,                                // Stripe net fees not applied; price≈proceeds
+      price_local: priceLocal,
+      currency: currency,
+      store: "STRIPE",
+      environment: isSandbox ? "SANDBOX" : "PRODUCTION",
+      country_code: countryCode,
+      received_at: admin.firestore.FieldValue.serverTimestamp(),
+      purchased_at_ms: purchasedAtMs,
+      is_trial_conversion: tt === "trial_to_paid",
+      app_user_id: appUserId,
+      original_transaction_id: otid,
+      is_sandbox: isSandbox,
+      recovered_from_billing: false,
+      lifetime_spend: lifetimeSpend,
+      lifetime_payments: lifetimePayments,
+      stripe_dedupe_key: dedupeKey,
+    };
+
+    await db.collection("transactions").add(tx);
+    return res.status(200).send("OK");
+  } catch (err) {
+    console.error("stripeWebhook error:", err.message, err.stack);
     return res.status(500).send("Error: " + err.message);
   }
 });
@@ -936,6 +1126,216 @@ functions.http("churnCohorts", async (req, res) => {
   }
 });
 
+// ---- Retention cohorts (subscription survival by cohort × week-age) ----
+// Same data + cohort model as the ROAS/pROAS tabs (install-day cohorts on the x-axis,
+// plan split by product keyword), but the metric is SURVIVAL, not dollars. For each
+// cohort day we emit the % of that cohort's subs still "retained" at a set of week-age
+// milestones (W1..W12). The dashboard draws one line per milestone across cohorts —
+// mirror of the ROAS chart's Dx lines — so a retention view reads with the same muscle
+// memory as ROAS.
+//
+// Two retention definitions, one per plan (both measured from each sub's OWN start):
+//   weekly : retained at week N  <=>  churn_age > N*7 days.
+//            churn_age = age (days from start) at the FIRST loss signal that was NOT
+//            recovered. A loss is expiration / cancellation / billing_issue / a
+//            BILLING_ERROR cancelReason. Per the product decision, a billing issue
+//            churns the sub IMMEDIATELY (bad card / insufficient funds = gone that
+//            week); a later SUCCESSFUL paid renewal (positive-price, non-refund) that
+//            lands AFTER a loss "recovers" the sub, so churn_age advances to the next
+//            un-recovered loss (or infinity if none). This folds recoveries — incl. the
+//            recovered weekly subs — back in, exactly like the pROAS alive logic, while
+//            still dipping retention at the moment payment fails.
+//   annual : retained at week N  <=>  no UNSUBSCRIBE (auto-renew turned off) by age N*7.
+//            Our apps are too young for matured 1-yr annual cohorts, so instead of true
+//            renewal we track the leading intent-to-cancel signal (auto-renew off). An
+//            annual counts as retained until the week it turns auto-renew off. Same
+//            x-axis / line structure; the y just means "% auto-renew still on".
+//
+// Per-cohort-day counts for the table (voluntary unsubs, in-billing-issue, recovered,
+// expired) are emitted alongside so the client can show the breakdown you asked for
+// without a second query. Everything keys on Superwall applicationId + install day in
+// ROAS_TZ so it lines up 1:1 with the ROAS cohorts.
+const RETENTION_MILESTONES_D = [7, 14, 21, 28, 42, 56, 70, 84]; // W1,2,3,4,6,8,10,12
+
+async function fetchRetentionCohorts(appId, plan) {
+  const p = plan === "annual" ? "annual" : plan === "weekly" ? "weekly" : "all";
+  // Plan filter folds into the anchors HAVING as an AND clause (not a second HAVING — that's a
+  // syntax error). `plan` is a SELECT alias, valid to reference in HAVING in ClickHouse.
+  const planHaving =
+    p === "annual" ? "AND plan = 'annual'" :
+    p === "weekly" ? "AND plan = 'weekly'" : "";
+
+  // Build the per-milestone retained/at-risk countIf() expressions inline. `chage` is the
+  // sub's churn age in days (weekly) — retained at milestone m <=> chage > m. For annual we
+  // use `unsub_age` (age at auto-renew-off) the same way.
+  const survCols = RETENTION_MILESTONES_D.map((m) =>
+    `countIf(chage > ${m}) AS w_${m}, countIf(anchor_age >= ${m}) AS n_${m}`
+  ).join(",\n  ");
+
+  const sql = `
+WITH anchors AS (
+  -- install-day cohort + plan classification, IDENTICAL to fetchProasCohorts / fetchRoasCohorts.
+  -- Require >=1 positive-price non-refund paid event so $0 billing-failed initial_purchase ghosts
+  -- (which never paid) don't inflate the denominator or the survival rates.
+  SELECT originalTransactionId AS otid,
+    toDate(toTimeZone(coalesce(min(installDate), min(purchasedAt)), '${ROAS_TZ}')) AS cohort_day,
+    -- start_day = first PAID event day, in tz; survival age is measured from this (the day the
+    -- subscription actually began paying), not the install day, so week-ages line up with renewals.
+    toDate(toTimeZone(minIf(purchasedAt, isRefund = 0 AND toFloat64(proceeds) > 0), '${ROAS_TZ}')) AS start_day,
+    if(argMin(productId, purchasedAt) ILIKE '%annual%' OR argMin(productId, purchasedAt) ILIKE '%year%', 'annual', 'weekly') AS plan
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+    AND name IN ('initial_purchase','renewal','non_renewing_purchase','product_change')
+  GROUP BY otid
+  HAVING countIf(name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) > 0
+    ${planHaving}
+),
+ev AS (
+  -- every lifecycle event for these subs, tagged with its role, so we can find the FIRST
+  -- un-recovered loss and the LAST paid event.
+  SELECT originalTransactionId AS otid,
+    toTimeZone(purchasedAt, '${ROAS_TZ}') AS t,
+    (name IN ('expiration','cancellation','billing_issue') OR cancelReason = 'BILLING_ERROR') AS is_loss,
+    (name IN ('initial_purchase','renewal','non_renewing_purchase','product_change') AND isRefund = 0 AND toFloat64(proceeds) > 0) AS is_paid,
+    (cancelReason = 'UNSUBSCRIBE') AS is_unsub,
+    (name = 'billing_issue' OR cancelReason = 'BILLING_ERROR') AS is_billing,
+    (name = 'cancellation' OR cancelReason = 'UNSUBSCRIBE') AS is_cancel,
+    (name = 'expiration') AS is_expire
+  FROM open_revenue.attributed_events_by_ts_rep
+  WHERE applicationId = ${Number(appId)} AND isSandbox = 0 AND originalTransactionId != ''
+),
+state AS (
+  -- Effective churn timestamp per sub. Compare event TIMES so recoveries count:
+  --   last_loss  = latest loss signal time
+  --   last_paid  = latest successful paid time
+  --   first_loss = earliest loss signal time (the raw churn moment, ignoring recovery)
+  -- churn_ts = the sub's effective churn moment:
+  --   - if never lost -> NULL (never churned)
+  --   - if recovered (last_paid > last_loss) -> NULL (currently alive; a future loss would
+  --     re-mark it, but as of now it's retained through the horizon)
+  --   - else -> first_loss (immediate churn at first un-recovered loss; billing failure counts
+  --     immediately, matching the product decision)
+  SELECT otid,
+    minIf(t, is_loss = 1) AS first_loss,
+    maxIf(t, is_loss = 1) AS last_loss,
+    maxIf(t, is_paid = 1) AS last_paid,
+    minIf(t, is_unsub = 1) AS first_unsub,
+    -- current-state breakdown flags for the table (as of now):
+    maxIf(t, is_billing = 1) AS last_billing,
+    max(is_unsub) AS ever_unsub,
+    max(is_expire) AS ever_expire,
+    -- recovered = had a loss AND a later successful paid event (came back after failing)
+    (maxIf(t, is_loss = 1) > toDateTime64(0, 6, '${ROAS_TZ}') AND maxIf(t, is_paid = 1) > maxIf(t, is_loss = 1)) AS recovered
+  FROM ev
+  GROUP BY otid
+),
+subs AS (
+  SELECT a.cohort_day AS cohort_day, a.plan AS plan, a.otid AS otid, a.start_day AS start_day,
+    -- age of the whole subscription so far (days from its start), used to gate maturity per milestone
+    dateDiff('day', a.start_day, today()) AS anchor_age,
+    -- churn age in days from start. For weekly: the effective churn moment (recovery-aware).
+    -- For annual: age at auto-renew-off (UNSUBSCRIBE) — the intent signal. NULL/absent -> "never",
+    -- represented as a huge age so it's retained at every milestone.
+    multiIf(
+      a.plan = 'annual',
+        if(s.first_unsub > toDateTime64(0,6,'${ROAS_TZ}'), dateDiff('day', a.start_day, toDate(s.first_unsub)), 100000),
+      -- weekly:
+      s.first_loss = toDateTime64(0,6,'${ROAS_TZ}'), 100000,             -- never lost
+      s.last_paid > s.last_loss, 100000,                                  -- recovered / currently alive
+      dateDiff('day', a.start_day, toDate(s.first_loss))                  -- churned at first un-recovered loss
+    ) AS chage,
+    s.recovered AS recovered,
+    -- in-billing-issue NOW: latest billing failure with no successful paid event after it
+    (s.last_billing > toDateTime64(0,6,'${ROAS_TZ}') AND s.last_paid <= s.last_billing) AS billing_now,
+    s.ever_unsub AS unsub,
+    s.ever_expire AS expired
+  FROM anchors a
+  LEFT JOIN state s ON a.otid = s.otid
+)
+SELECT toString(cohort_day) AS day,
+  plan,
+  count() AS size,
+  ${survCols},
+  countIf(recovered = 1) AS recovered,
+  countIf(billing_now = 1) AS billing_now,
+  countIf(unsub = 1) AS unsub,
+  countIf(expired = 1) AS expired
+FROM subs
+WHERE cohort_day >= today() - ${ROAS_WINDOW_DAYS}
+GROUP BY cohort_day, plan
+ORDER BY cohort_day DESC
+FORMAT JSONEachRow`.trim();
+
+  const rows0 = await swQuery(sql);
+
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: ROAS_TZ }).format(new Date());
+  const todayMs = Date.parse(todayKey + "T00:00:00Z");
+
+  const rows = rows0.map((r) => {
+    const surv = {};
+    RETENTION_MILESTONES_D.forEach((m) => {
+      surv[m] = { retained: Number(r["w_" + m]) || 0, base: Number(r["n_" + m]) || 0 };
+    });
+    return {
+      day: r.day,
+      plan: r.plan,
+      ageDays: Math.floor((todayMs - Date.parse(r.day + "T00:00:00Z")) / 86400000),
+      size: Number(r.size) || 0,
+      surv, // per-milestone { retained, base } — base = subs old enough to have reached that age
+      recovered: Number(r.recovered) || 0,
+      billing_now: Number(r.billing_now) || 0,
+      unsub: Number(r.unsub) || 0,
+      expired: Number(r.expired) || 0,
+    };
+  });
+
+  return {
+    appId: Number(appId),
+    appName: ROAS_APP_NAMES[Number(appId)] || String(appId),
+    plan: p,
+    tz: ROAS_TZ,
+    windowDays: ROAS_WINDOW_DAYS,
+    milestonesDays: RETENTION_MILESTONES_D,
+    rows,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+functions.http("retentionCohorts", async (req, res) => {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = [
+    "https://tangent-apps.github.io",
+    "https://tangent-transactions-dashboard.web.app",
+    "https://tangent-transactions-dashboard.firebaseapp.com",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://localhost:8899",
+  ];
+  if (allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "GET") return res.status(405).send("Not allowed");
+
+  try {
+    const authHeader = req.headers.authorization || "";
+    if (!(await isAuthorized(authHeader))) return res.status(401).json({ error: "Unauthorized" });
+
+    const appId = Number(req.query.appId || 0);
+    if (!appId) return res.status(400).json({ error: "appId required" });
+    const plan = String(req.query.plan || "all");
+    const data = await fetchRetentionCohorts(appId, plan === "all" ? null : plan);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("retentionCohorts error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ---- Refund cohorts ----
 // Same cohort model as churn: weekly cohorts by subscription start
 // (initial_purchase.purchasedAt), per app, plan-split by product keyword.
@@ -1105,6 +1505,9 @@ functions.http("refundCohorts", async (req, res) => {
 // matching what scripts/sync-cohorts.sh wrote.
 const SYNC_APPS = [32830, 22372, 35269]; // GirlWalk, GirlTalk, Poly AI — must match dashboard CHURN_APPS/REFUND_APPS
 const SYNC_PLANS = ["all", "weekly", "annual"];
+// Apps that also get retention cohorts precomputed. GirlWalk only for now (most
+// mature cohorts + paid UA); extend to match dashboard RETENTION_APPS as needed.
+const RETENTION_APPS = [32830]; // GirlWalk
 
 async function runCohortSync() {
   const nowIso = new Date().toISOString();
@@ -1133,6 +1536,19 @@ async function runCohortSync() {
         results.refund++;
       } catch (e) {
         results.failed.push(`refund ${appId}/${plan}: ${e.message}`);
+      }
+      // retention (survival cohorts) — same app×plan grid, GirlWalk only for now
+      if (RETENTION_APPS.includes(appId)) {
+        try {
+          const data = await fetchRetentionCohorts(appId, planArg);
+          await db.collection("retention_cohorts").doc(`${appId}__${plan}`).set({
+            payload: JSON.stringify(data),
+            generatedAt: nowIso,
+          });
+          results.retention = (results.retention || 0) + 1;
+        } catch (e) {
+          results.failed.push(`retention ${appId}/${plan}: ${e.message}`);
+        }
       }
     }
   }
