@@ -16,21 +16,25 @@ const SW_APP_ID_TO_NAME = {
 };
 
 // Resolve app_name for a Stripe transaction. Prefer the Superwall initiating app id
-// (exact, present on SW web checkouts); else match the Stripe product NAME by keyword
-// (Stripe price ids carry no app hint, but product names do: "GW Weekly 7.99",
-// "Poly iMessage — yearly", "Annual Open"). Falls back to the product name itself.
-function resolveStripeAppName(swInitiatingAppId, productName) {
+// (exact, present on SW web checkouts); else match a NAME string by keyword. The name
+// can be a Stripe product name (invoice path: "GW Weekly 7.99", "Annual Open") OR a
+// charge description (standalone-charge path: "Poly iMessage — yearly",
+// "Poly Message Web — weekly"). Falls back to the name itself.
+function resolveStripeAppName(swInitiatingAppId, name) {
   if (swInitiatingAppId && SW_APP_ID_TO_NAME[String(swInitiatingAppId)]) {
     return SW_APP_ID_TO_NAME[String(swInitiatingAppId)];
   }
-  const n = (productName || "").toLowerCase();
+  const n = (name || "").toLowerCase();
   if (n.includes("imessage")) return "Poly iMessage";
   if (n.startsWith("gw ") || n.includes("girlwalk") || n.includes("girl walk")) return "GirlWalk";
   if (n.includes("girltalk") || n.includes("girl talk")) return "GirlTalk";
-  // Poly AI's Stripe products are named "All-Access …", "Annual …" (no "poly" token).
+  // "Poly Message …" (custom iMessage checkout) and Poly AI's Stripe products
+  // ("All-Access …", "Annual …", no "poly" token) both map to Poly AI's family.
+  // NOTE: "Poly Message Web" is the iMessage product → keep it as Poly iMessage.
+  if (n.includes("poly message") || n.includes("poly imessage")) return "Poly iMessage";
   if (n.includes("poly") || n.includes("all-access") || n.startsWith("annual") ||
       n.includes("chat credit")) return "Poly AI";
-  return productName || "Stripe";
+  return name || "Stripe";
 }
 
 // Map a Stripe invoice onto the dashboard's transaction_type vocabulary.
@@ -50,4 +54,20 @@ function stripeInvoiceToTxType(invoice) {
   return "renewal"; // unknown recurring reason — still real revenue
 }
 
-module.exports = { SW_APP_ID_TO_NAME, resolveStripeAppName, stripeInvoiceToTxType };
+// Some products (e.g. Poly iMessage yearly) bill via a standalone PaymentIntent with
+// NO invoice — the money lands in a `charge.succeeded` whose `invoice` is null, and the
+// paired invoice (if any) is $0. Those must be ingested from the charge, else the
+// revenue is invisible. Charges that DO carry an invoice are handled by invoice.paid
+// (ingesting them here too would double-count) — callers must gate on !charge.invoice.
+//
+// Without invoice/subscription state we can't cleanly tell a first purchase from a
+// renewal, so classify every standalone charge as a purchase. Yearly/one-off →
+// one_time_purchase feel wrong for a sub, so we use new_subscription for recurring
+// plans (metadata.plan present) and one_time_purchase otherwise.
+function stripeChargeToTxType(charge) {
+  const plan = (charge.metadata && charge.metadata.plan) || "";
+  if (plan) return "new_subscription"; // weekly/yearly/etc — a recurring plan purchase
+  return "one_time_purchase";
+}
+
+module.exports = { SW_APP_ID_TO_NAME, resolveStripeAppName, stripeInvoiceToTxType, stripeChargeToTxType };

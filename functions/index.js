@@ -248,7 +248,7 @@ functions.http("swWebhook", async (req, res) => {
 
 // Stripe → dashboard mapping helpers live in ./stripeMap.js so the backfill script
 // (scripts/backfill-stripe.js) shares the exact same classification + app resolution.
-const { resolveStripeAppName, stripeInvoiceToTxType } = require("./stripeMap");
+const { resolveStripeAppName, stripeInvoiceToTxType, stripeChargeToTxType } = require("./stripeMap");
 
 let _stripeClient = null;
 function stripe() {
@@ -314,6 +314,24 @@ functions.http("stripeWebhook", async (req, res) => {
       countryCode = (obj.account_country || "").toUpperCase();
       purchasedAtMs = (obj.created || event.created) * 1000;
       dedupeKey = obj.id || ("evt_" + event.id); // invoice id
+    } else if (event.type === "charge.succeeded") {
+      // Standalone charge with NO invoice (e.g. Poly iMessage yearly — custom
+      // PaymentIntent checkout, the paired invoice is $0). Ingest from the charge.
+      // Charges that DO have an invoice are handled by invoice.paid above — skip them
+      // here to avoid double counting.
+      if (obj.invoice) return res.status(200).send("Skip (charge has invoice — handled by invoice.paid)");
+      if (obj.amount === 0 || obj.status !== "succeeded") return res.status(200).send("Skip (zero/unsuccessful charge)");
+      tt = stripeChargeToTxType(obj);
+      priceUSD = (obj.amount || 0) / 100;
+      currency = (obj.currency || "usd").toUpperCase();
+      priceLocal = priceUSD;
+      customerId = typeof obj.customer === "string" ? obj.customer : customerId;
+      countryCode = ((obj.billing_details && obj.billing_details.address && obj.billing_details.address.country) || "").toUpperCase();
+      metadata = obj.metadata || {};
+      productName = obj.description || ""; // "Poly iMessage — yearly" → resolver maps it
+      priceId = (metadata.plan ? ("stripe_charge:" + metadata.plan) : "");
+      purchasedAtMs = (obj.created || event.created) * 1000;
+      dedupeKey = obj.id || ("evt_" + event.id); // charge id
     } else if (event.type === "charge.refunded") {
       tt = "refund";
       priceUSD = -Math.abs((obj.amount_refunded || obj.amount || 0) / 100);
@@ -323,6 +341,7 @@ functions.http("stripeWebhook", async (req, res) => {
       countryCode = ((obj.billing_details && obj.billing_details.address && obj.billing_details.address.country) || "").toUpperCase();
       metadata = obj.metadata || {};
       priceId = "";
+      productName = obj.description || ""; // fallback attribution for no-invoice charges
       // Try to attribute to the sub/product via the charge's invoice.
       if (obj.invoice) {
         try {
@@ -349,8 +368,9 @@ functions.http("stripeWebhook", async (req, res) => {
     const appName = resolveStripeAppName(swInitiatingAppId, productName);
     // original_transaction_id: subscription id (mirrors otid — enables LTV rollup + dedupe)
     const otid = subId || customerId || dedupeKey;
-    // app_user_id: prefer the app's own user id in metadata, else Stripe customer id
-    const appUserId = metadata.gw_uid || metadata._sw_app_user_id || customerId || "";
+    // app_user_id: prefer the app's own user id in metadata (gw_uid / Superwall id /
+    // iMessage handle), else Stripe customer id.
+    const appUserId = metadata.gw_uid || metadata._sw_app_user_id || metadata.handle || customerId || "";
 
     // Dedupe: Stripe retries webhooks. Skip if this (otid, dedupeKey, tt) already stored.
     if (dedupeKey) {

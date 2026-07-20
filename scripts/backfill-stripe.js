@@ -30,7 +30,7 @@
 const path = require("path");
 const admin = require(path.join(__dirname, "..", "functions", "node_modules", "firebase-admin"));
 const Stripe = require(path.join(__dirname, "..", "functions", "node_modules", "stripe"));
-const { resolveStripeAppName, stripeInvoiceToTxType } = require(
+const { resolveStripeAppName, stripeInvoiceToTxType, stripeChargeToTxType } = require(
   path.join(__dirname, "..", "functions", "stripeMap"));
 
 // ---- args ----
@@ -126,6 +126,7 @@ async function docFromRefund(charge) {
       name = await productName(productId);
     } catch (e) { console.warn("refund invoice fetch failed", e.message); }
   }
+  if (!name) name = charge.description || ""; // no-invoice charge → attribute by description
   const swAppId = md._sw_initiating_application_id || md._sw_application_id || "";
   const customerId = typeof charge.customer === "string" ? charge.customer : "";
   const otid = subId || customerId || charge.id;
@@ -144,7 +145,43 @@ async function docFromRefund(charge) {
     received_at: admin.firestore.Timestamp.fromMillis((charge.created || 0) * 1000),
     purchased_at_ms: (charge.created || 0) * 1000,
     is_trial_conversion: false,
-    app_user_id: md.gw_uid || md._sw_app_user_id || customerId || "",
+    app_user_id: md.gw_uid || md._sw_app_user_id || md.handle || customerId || "",
+    original_transaction_id: otid,
+    is_sandbox: charge.livemode === false,
+    recovered_from_billing: false,
+    lifetime_spend: null,
+    lifetime_payments: null,
+    stripe_dedupe_key: charge.id,
+    backfilled: true,
+  };
+}
+
+// Standalone succeeded charge with NO invoice (e.g. Poly iMessage yearly custom
+// checkout). Mirrors the stripeWebhook charge.succeeded path.
+async function docFromCharge(charge) {
+  const tt = stripeChargeToTxType(charge);
+  const priceUSD = (charge.amount || 0) / 100;
+  const md = charge.metadata || {};
+  const name = charge.description || "";
+  const swAppId = md._sw_initiating_application_id || md._sw_application_id || "";
+  const customerId = typeof charge.customer === "string" ? charge.customer : "";
+  const otid = customerId || charge.id;
+  return {
+    event_type: "charge.succeeded",
+    transaction_type: tt,
+    app_name: resolveStripeAppName(swAppId, name),
+    product_id: md.plan ? ("stripe_charge:" + md.plan) : (name || ""),
+    price: priceUSD,
+    proceeds: priceUSD,
+    price_local: priceUSD,
+    currency: (charge.currency || "usd").toUpperCase(),
+    store: "STRIPE",
+    environment: charge.livemode === false ? "SANDBOX" : "PRODUCTION",
+    country_code: ((charge.billing_details && charge.billing_details.address && charge.billing_details.address.country) || "").toUpperCase(),
+    received_at: admin.firestore.Timestamp.fromMillis((charge.created || 0) * 1000),
+    purchased_at_ms: (charge.created || 0) * 1000,
+    is_trial_conversion: false,
+    app_user_id: md.gw_uid || md._sw_app_user_id || md.handle || customerId || "",
     original_transaction_id: otid,
     is_sandbox: charge.livemode === false,
     recovered_from_billing: false,
@@ -158,7 +195,7 @@ async function docFromRefund(charge) {
 async function run() {
   console.log(`Backfill Stripe → transactions since ${new Date(sinceMs).toISOString().slice(0,10)}` +
     (DRY ? " [DRY RUN]" : ""));
-  let written = 0, skippedDup = 0, skippedZero = 0, refunds = 0;
+  let written = 0, skippedDup = 0, skippedZero = 0, refunds = 0, charges = 0;
 
   // 1. Paid invoices (subscriptions + one-time). Expand line item price for product id.
   for await (const inv of stripe.invoices.list({
@@ -176,21 +213,36 @@ async function run() {
     written++;
   }
 
-  // 2. Refunds — list charges that were refunded.
+  // 2. Charges: refunds (any) + standalone succeeded charges with NO invoice
+  //    (invoice-backed charges are covered by loop 1's invoice.paid).
   for await (const charge of stripe.charges.list({
     created: { gte: sinceUnix },
     limit: 100,
   })) {
-    if (!charge.refunded && (charge.amount_refunded || 0) === 0) continue;
-    const doc = await docFromRefund(charge);
-    if (onlyApp && (doc.app_name || "").toLowerCase() !== onlyApp) continue;
-    if (await alreadyStored(doc.stripe_dedupe_key, "refund")) { skippedDup++; continue; }
-    if (DRY) { console.log("WOULD WRITE refund", doc.app_name, "$" + doc.price, charge.id); }
-    else { await db.collection("transactions").add(doc); }
-    written++; refunds++;
+    // 2a. Refund
+    if (charge.refunded || (charge.amount_refunded || 0) > 0) {
+      const doc = await docFromRefund(charge);
+      if (!(onlyApp && (doc.app_name || "").toLowerCase() !== onlyApp)) {
+        if (await alreadyStored(doc.stripe_dedupe_key, "refund")) { skippedDup++; }
+        else {
+          if (DRY) { console.log("WOULD WRITE refund", doc.app_name, "$" + doc.price, charge.id); }
+          else { await db.collection("transactions").add(doc); }
+          written++; refunds++;
+        }
+      }
+    }
+    // 2b. Standalone succeeded charge (no invoice) = the revenue event for custom checkouts
+    if (charge.status === "succeeded" && charge.amount > 0 && !charge.invoice) {
+      const doc = await docFromCharge(charge);
+      if (onlyApp && (doc.app_name || "").toLowerCase() !== onlyApp) continue;
+      if (await alreadyStored(doc.stripe_dedupe_key, doc.transaction_type)) { skippedDup++; continue; }
+      if (DRY) { console.log("WOULD WRITE", doc.transaction_type, doc.app_name, "$" + doc.price, "(charge)", charge.id); }
+      else { await db.collection("transactions").add(doc); }
+      written++; charges++;
+    }
   }
 
-  console.log(`Done. written=${written} (refunds=${refunds}) skippedDup=${skippedDup} skippedZeroInvoice=${skippedZero}`);
+  console.log(`Done. written=${written} (refunds=${refunds}, standalone-charges=${charges}) skippedDup=${skippedDup} skippedZeroInvoice=${skippedZero}`);
   process.exit(0);
 }
 

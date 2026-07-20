@@ -108,6 +108,17 @@ Fixed with `scripts/relabel-legacy-stripe.js`:
 - **Left 4** docs on the ambiguous "Test" product as `"Stripe Web"` (couldn't safely attribute).
 - Then re-added the 2 genuine Poly iMessage sales (+2 refunds) via `--only-app`.
 
+### Fix: standalone charges (no invoice) — added after first ship
+Poly iMessage yearly ($39.99) and some Poly weekly sales bill via a **custom
+PaymentIntent with NO invoice** — the paired invoice is $0, the money is in a
+`charge.succeeded` whose `invoice` is null. The original code only read `invoice.paid`
+so these were invisible (the "yesterday/today transactions I don't see" report).
+Fixed by handling `charge.succeeded` for charges without an invoice (gated on
+`!charge.invoice` to avoid double-counting invoice-backed charges), in both the webhook
+and the backfill, plus `stripeChargeToTxType` in stripeMap.js. `charge.succeeded` added
+to the endpoint's enabled_events. app_name/app_user_id fall back to charge
+description / `metadata.handle`.
+
 ### Known cosmetic (pre-existing, NOT touched)
 Legacy GirlWalk rows carry float-noisy prices (`$5.9959…`) because the old path stored
 proceeds-as-price. Dashboard `formatCurrency` rounds to `$5.99` on display. Harmless.
