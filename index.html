@@ -2805,6 +2805,10 @@
       const type = tx.transaction_type;
       const price = Number(tx.price || 0);
       const app = tx.app_name || "Unknown";
+      // Plan from product id — same rule as the churn/refund cohorts:
+      // 'annual' or 'year' in the id → annual, otherwise weekly.
+      const pid = (tx.product_id || "").toLowerCase();
+      const isAnnual = pid.includes("annual") || pid.includes("year");
 
       if (type === "new_subscription" || type === "trial_to_paid" || type === "one_time_purchase") {
         // Conversion reward tiered by $amount only (not by type):
@@ -2814,7 +2818,9 @@
         const tier = price > 60 ? 3 : price >= 10 ? 2 : 1;
         const confettiCount = tier === 3 ? 350 : tier === 2 ? 200 : 120;
         const vol = Math.min(0.55, 0.2 + tier * 0.12);
-        if (soundEnabled) playChaChing(vol);
+        // Distinct cue per plan: annual (big money) = bombastic cha-ching,
+        // weekly = cash chord arpeggio. Volume still scales with $ tier.
+        if (soundEnabled) { if (isAnnual) playChaChing(vol); else playCashChord(vol); }
         launchConfetti(confettiCount, [
           "#4ade80","#22c55e","#16a34a","#86efac","#bbf7d0",
           "#fde047","#facc15","#eab308","#fef08a",
@@ -2828,10 +2834,7 @@
         flyAmount(price, "#c084fc");
         showToast(`🔁 ${app} renewal • $${price.toFixed(2)}`, "#c084fc");
       } else if (type === "refund") {
-        if (soundEnabled) {
-          noiseBurst(0.5, 4000, 10000, 0.3);
-          noiseBurst(0.7, 2000, 6000, 0.2);
-        }
+        // No audio for refunds (by request) — keep the visual cue only.
         flashScreen("#dc2626");
         showToast(`💸 ${app} refund • -$${price.toFixed(2)}`, "#fca5a5");
       }
@@ -2885,17 +2888,12 @@
           <button data-act="refund" data-price="9.99" class="tb">💸 Refund \$9.99</button>
           <button data-act="refund" data-price="59.99" class="tb">💸 Refund \$59.99</button>
 
-          <div style="opacity:0.85;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;color:#4ade80;font-weight:700">★ Sale SFX A/B — weekly vs annual</div>
-          <div style="opacity:0.5;font-size:10px;margin:-2px 0 2px">Compare each option's weekly vs annual. Pick one.</div>
-          <div class="sfx-row"><span class="sfx-lab">A · loud=value</span>
-            <button data-snd="A_wk" class="tb sfx">🪙 Weekly</button>
-            <button data-snd="A_an" class="tb sfx">🔔 Annual</button></div>
-          <div class="sfx-row"><span class="sfx-lab">B · annual+fanfare</span>
-            <button data-snd="B_wk" class="tb sfx">🔔 Weekly</button>
-            <button data-snd="B_an" class="tb sfx">🎺 Annual</button></div>
-          <div class="sfx-row"><span class="sfx-lab">C · distinct tone</span>
-            <button data-snd="C_wk" class="tb sfx">🎼 Weekly</button>
-            <button data-snd="C_an" class="tb sfx">🎐 Annual</button></div>
+          <div style="opacity:0.85;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;color:#4ade80;font-weight:700">★ Live sale cues (by plan)</div>
+          <div class="sfx-row"><span class="sfx-lab">weekly sale</span>
+            <button data-snd="cashchord" class="tb sfx">🎵 Cash chord</button></div>
+          <div class="sfx-row"><span class="sfx-lab">annual sale</span>
+            <button data-snd="chaching" class="tb sfx">🔔 Cha-ching</button></div>
+          <div style="opacity:0.5;font-size:10px;margin:2px 0 2px">Refunds are silent. These are what actually fire now.</div>
 
           <div style="opacity:0.6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-top:8px">Sound variants only</div>
           <button data-snd="chaching" class="tb">🔔 Cha-ching</button>
@@ -2926,7 +2924,7 @@
 
       const body = panel.querySelector("#testerBody");
       const chevron = panel.querySelector("#testerChevron");
-      let open = localStorage.getItem("testerOpen") !== "0"; // open by default (SFX A/B)
+      let open = localStorage.getItem("testerOpen") === "1"; // closed by default
       function applyOpen() {
         body.style.display = open ? "flex" : "none";
         chevron.textContent = open ? "▾" : "▸";
@@ -2963,12 +2961,7 @@
           else if (s === "mega") playMegaWin(0.5);
           else if (s === "bass") bassThump(0.6);
           else if (s === "sparkle") { noiseBurst(0.5, 4000, 10000, 0.3); noiseBurst(0.7, 2000, 6000, 0.2); }
-          else if (s === "A_wk") saleA_weekly(0.45);
-          else if (s === "A_an") saleA_annual(0.5);
-          else if (s === "B_wk") saleB_weekly(0.45);
-          else if (s === "B_an") saleB_annual(0.5);
-          else if (s === "C_wk") saleC_weekly(0.5);
-          else if (s === "C_an") saleC_annual(0.5);
+          else if (s === "cashchord") playCashChord(0.45);
         };
       });
       panel.querySelectorAll("button[data-vis]").forEach(b => {
@@ -3050,84 +3043,8 @@
       });
     }
 
-    // ============================================================
-    // SALE SFX CANDIDATES — weekly vs annual, 3 competing options.
-    // Wired into the tester panel so the exact pairs can be A/B'd in
-    // the live Activity view. Once a winner is chosen, fireReward's
-    // conversion branch calls the two chosen fns by plan. Losing
-    // candidates get deleted then.
-    // ------------------------------------------------------------
-    // Small generic tone helper (through master + optional reverb).
-    function tone(opts) {
-      const ctx = getAudioCtx();
-      if (!ctx) return;
-      const master = makeMasterChain();
-      const reverb = opts.reverb ? getReverb() : null;
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = opts.type || "triangle";
-      const t0 = now + (opts.start || 0);
-      if (opts.endF) {
-        osc.frequency.setValueAtTime(opts.freq, t0);
-        osc.frequency.exponentialRampToValueAtTime(opts.endF, t0 + opts.dur);
-      } else {
-        osc.frequency.value = opts.freq;
-      }
-      gain.gain.setValueAtTime(0, t0);
-      gain.gain.linearRampToValueAtTime(opts.vol, t0 + 0.005);
-      gain.gain.exponentialRampToValueAtTime(0.001, t0 + opts.dur);
-      osc.connect(gain).connect(master);
-      if (reverb) gain.connect(reverb.input);
-      osc.start(t0);
-      osc.stop(t0 + opts.dur + 0.05);
-    }
-
-    // ---- Option A: loudness maps to value ----
-    // Weekly = light crisp ping. Annual = full bombastic cha-ching.
-    function saleA_weekly(volume) {
-      // single bright triangle ping + tiny fifth shimmer (mellower than playCoin)
-      tone({ freq: 1318.51, endF: 1760, dur: 0.28, vol: volume * 0.9, type: "triangle", reverb: true }); // E6→A6
-      tone({ freq: 2637, dur: 0.35, vol: volume * 0.3, type: "sine", start: 0.05, reverb: true });
-    }
-    function saleA_annual(volume) {
-      playChaChing(volume); // the existing full celebration, reserved for annual
-    }
-
-    // ---- Option B: same cha-ching DNA, annual adds a rising fanfare tail ----
-    function saleB_weekly(volume) {
-      playChaChing(volume);
-    }
-    function saleB_annual(volume) {
-      playChaChing(volume);
-      // ascending C-E-G-C arpeggio layered on top, starting after the initial hit
-      const ctx = getAudioCtx();
-      if (!ctx) return;
-      [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
-        tone({ freq: f, dur: 0.4, vol: volume * 0.55, type: "triangle", start: 0.28 + i * 0.09, reverb: true });
-      });
-    }
-
-    // ---- Option C: distinct timbres, ID plan by ear ----
-    // Weekly = warm wooden marimba double-note. Annual = bright metallic bell cascade.
-    function saleC_weekly(volume) {
-      // mellow marimba: two soft sine notes, quick decay, no reverb (dry/wooden)
-      [{ f: 523.25, s: 0 }, { f: 783.99, s: 0.08 }].forEach(n => {
-        tone({ freq: n.f, dur: 0.3, vol: volume * 0.7, type: "sine", start: n.s });
-      });
-    }
-    function saleC_annual(volume) {
-      // glassy bell cascade: bright triangle bells descending with long reverb + sparkle
-      bassThump(volume * 0.5);
-      [2093.0, 1760, 1567.98, 1318.51, 1046.5].forEach((f, i) => {
-        tone({ freq: f, dur: 0.7 - i * 0.05, vol: volume * (0.7 - i * 0.08), type: "triangle", start: i * 0.07, reverb: true });
-      });
-      noiseBurst(0.5, 5000, 11000, volume * 0.12);
-    }
-
-    // Tester panel: always mounted so the Sale SFX A/B can be tried in the
-    // live Activity view. Collapsed/expanded state persists in localStorage.
-    installTesterPanel();
+    // Tester panel hidden by default — append ?test=1 to the URL to show it.
+    if (new URLSearchParams(location.search).has("test")) installTesterPanel();
   </script>
 </body>
 </html>
