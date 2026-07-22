@@ -269,6 +269,7 @@
       <button class="section-btn" id="sectionChurn" onclick="setSection('churn')">Churn</button>
       <button class="section-btn" id="sectionRefunds" onclick="setSection('refunds')">Refunds</button>
       <button class="section-btn" id="sectionRoas" onclick="setSection('roas')">ROAS</button>
+      <button class="section-btn" id="sectionRetention" onclick="setSection('retention')">Retention</button>
     </nav>
   </div>
 
@@ -443,6 +444,7 @@
       document.getElementById("sectionChurn").className = "section-btn" + (sec === "churn" ? " active" : "");
       document.getElementById("sectionRefunds").className = "section-btn" + (sec === "refunds" ? " active" : "");
       document.getElementById("sectionRoas").className = "section-btn" + (sec === "roas" ? " active" : "");
+      document.getElementById("sectionRetention").className = "section-btn" + (sec === "retention" ? " active" : "");
       // Activity-only controls hide off Activity via visibility (keeps the grid
       // track, so the section nav in the last column never shifts).
       document.getElementById("activityControls").classList.toggle("hidden", sec !== "activity");
@@ -450,6 +452,7 @@
       if (sec === "churn") { renderChurn(); loadChurn(); return; }
       if (sec === "refunds") { renderRefunds(); loadRefunds(); return; }
       if (sec === "roas") { renderRoas(); loadRoas(); return; }
+      if (sec === "retention") { renderRetention(); loadRetention(); return; }
       renderAll();
     };
 
@@ -1547,6 +1550,295 @@
 
       container.innerHTML = header + tiles + chart + table;
       roasWireHover(buckets, projByKey);
+    }
+
+    // ================= Retention (subscription survival cohorts) =================
+    // Reads Firestore retention_cohorts/{appId}__{plan} (precomputed daily, like churn/roas).
+    // Mirror of the ROAS tab: x-axis = install cohorts (day/week/month), one line per WEEK-AGE
+    // milestone (W1..W12), y = % of cohort still paying by that week. Weekly uses recovery-aware
+    // survival (billing failure churns immediately, a later paid renewal recovers it); annual uses
+    // "auto-renew still on" (UNSUBSCRIBE = the leading cancel-intent signal), since no annual cohort
+    // has matured to its 1-yr renewal yet. Per-cohort table shows the recovered / in-billing-issue /
+    // voluntary-unsub / expired breakdown.
+    const RETENTION_APPS = [["32830","GirlWalk"]]; // GirlWalk only for now (matches backend RETENTION_APPS)
+    // week-age lines, colored on the same ramp as ROAS_DX so the two charts feel identical.
+    const RETENTION_MS = [
+      { d:7,  k:"W1",  c:"#60a5fa" }, { d:14, k:"W2",  c:"#34d399" },
+      { d:21, k:"W3",  c:"#22d3ee" }, { d:28, k:"W4",  c:"#fbbf24" },
+      { d:42, k:"W6",  c:"#f472b6" }, { d:56, k:"W8",  c:"#a78bfa" },
+      { d:70, k:"W10", c:"#fb923c" }, { d:84, k:"W12", c:"#f87171" },
+    ];
+    const retDxOn = { W1:true, W2:true, W3:true, W4:true, W6:false, W8:false, W10:false, W12:true };
+    const RETENTION_PLANS = [["all","All"],["weekly","Weekly"],["annual","Annual"]];
+    const RETENTION_RANGES = [30, 60, 90, 180, 0]; // 0 = All (matches ROAS ranges)
+    let retApp = "32830";
+    let retPlan = "all";
+    let retRange = 90;
+    let retGran = "week"; // day | week | month — week reads best, like ROAS
+    let retData = {};      // "appId__plan" → payload
+    let retInflight = {};  // "appId__plan" → true while loading
+    let retError = null;
+    let retSelected = null; // cohort bucket key expanded in the table + highlighted on chart
+    function retKey() { return retApp + "__" + retPlan; }
+    window.setRetApp = function(id) { retApp = id; retSelected=null; renderRetention(); loadRetention(); };
+    window.setRetPlan = function(p) { retPlan = p; retSelected=null; renderRetention(); loadRetention(); };
+    window.setRetRange = function(w) { retRange = w; renderRetention(); };
+    window.setRetGran = function(g) { retGran = g; retSelected=null; renderRetention(); };
+    window.toggleRetDx = function(k) { retDxOn[k] = !retDxOn[k]; renderRetention(); };
+    window.selectRetCohort = function(key) { retSelected = retSelected===key ? null : key; renderRetention(); };
+
+    async function loadRetention() {
+      const key = retKey();
+      if (retInflight[key]) return;   // always refetch on view; guard only concurrent loads
+      retInflight[key] = true; retError = null;
+      try {
+        const snap = await getDoc(doc(db, "retention_cohorts", retApp + "__" + retPlan));
+        if (!snap.exists()) throw new Error("no data yet for this app/plan");
+        retData[key] = JSON.parse(snap.data().payload);
+      } catch (e) {
+        console.warn("retention load failed", e);
+        retError = e.message;
+      } finally {
+        delete retInflight[key];
+        if (section === "retention") renderRetention();
+      }
+    }
+
+    // retention % color: survival is GOOD high, so invert the ROAS ramp —
+    // green when high, amber mid, red low. null -> "".
+    function retColor(pct) {
+      if (pct == null) return "";
+      if (pct >= 40) return "#4ade80";
+      if (pct >= 20) return "#fbbf24";
+      return "#f87171";
+    }
+
+    // Aggregate raw per-cohort-DAY rows into buckets (day/week/month) using the SAME
+    // bucket keying as ROAS (roasBucket), so the x-axis reads identically. Each bucket
+    // sums, per milestone, `ret` (subs still paying at week m) and `base` (subs old
+    // enough to have reached week m). retention % = ret/size (see rx below) — full-cohort
+    // denominator, shown only once the WHOLE bucket has matured past m, so young cohorts
+    // don't show a distorted deep-week point. Mirrors ROAS's maturity gate.
+    function retAggregate(rows, gran) {
+      const buckets = new Map();
+      for (const r of rows) {
+        const b = roasBucket(r.day, gran);
+        let a = buckets.get(b.key);
+        if (!a) { a = { key:b.key, label:b.label, size:0, minAge:Infinity, cohortStart:r.day,
+          ret:{}, base:{}, recovered:0, billing_now:0, unsub:0, expired:0 };
+          RETENTION_MS.forEach(m => { a.ret[m.d]=0; a.base[m.d]=0; });
+          buckets.set(b.key, a); }
+        a.size += r.size;
+        a.minAge = Math.min(a.minAge, r.ageDays);
+        if (r.day < a.cohortStart) a.cohortStart = r.day;
+        a.recovered += r.recovered||0; a.billing_now += r.billing_now||0;
+        a.unsub += r.unsub||0; a.expired += r.expired||0;
+        RETENTION_MS.forEach(m => {
+          const s = r.surv && r.surv[m.d];
+          if (s) { a.ret[m.d] += s.retained||0; a.base[m.d] += s.base||0; }
+        });
+      }
+      const out = [...buckets.values()];
+      out.sort((x,y) => x.key < y.key ? 1 : -1); // newest first
+      for (const a of out) {
+        // retention % at milestone m = (subs still paying at week m) / (WHOLE cohort).
+        // Denominator is ALWAYS the full cohort size (constant across milestones), so the
+        // curve is a true survival curve and stays monotone (deeper m → fewer chage>m
+        // survivors ÷ same size). Gate purely on COHORT AGE: show milestone m once the whole
+        // bucket has aged past m days (minAge >= m), exactly like the ROAS tab gates its Dx.
+        // We deliberately DON'T require every sub's paid-age >= m (the old base===size gate):
+        // a few subs first-pay late (late trial conversion), so base[m] can sit just under
+        // size for a clearly-mature week — that blanked the whole week and broke the line.
+        // A late-payer simply isn't counted as retained at week m (not in ret[m]) — correct.
+        a.rx = (m) => {
+          if (a.minAge < m) return null;      // bucket not old enough to observe week m yet
+          if (a.size <= 0) return null;
+          return (a.ret[m] / a.size) * 100;   // survivors / full cohort
+        };
+        // "current" survival for the table = retention at the LARGEST milestone the whole
+        // bucket has matured past (deepest observed point on its curve). null if none yet.
+        let cur = null, curK = null;
+        for (const m of RETENTION_MS) { const v = a.rx(m.d); if (v!=null) { cur=v; curK=m.k; } }
+        a.cur = cur; a.curK = curK;
+      }
+      return out;
+    }
+
+    let retChartGeom = null; // stashed for hover
+    function retChart(bucketsNewestFirst) {
+      const B = [...bucketsNewestFirst].reverse(); // oldest → newest, left → right
+      if (!B.length) return '<div class="pf-chart-wrap"><div class="loading">No cohorts</div></div>';
+      const W=1140,H=360,PADL=44,PADR=16,PADT=14,PADB=32;
+      const series = RETENTION_MS.map(m => ({ m, pts: B.map((b,i)=>({ i, v: b.rx(m.d) })) }));
+      // y-axis is % survival: fixed 0..100 so cohorts are comparable and the axis never jumps.
+      const ymax = 100;
+      const X = i => PADL + (B.length>1 ? i*((W-PADL-PADR)/(B.length-1)) : (W-PADL-PADR)/2);
+      const Y = v => PADT + (1 - v/ymax)*(H-PADT-PADB);
+      retChartGeom = { B, X, W, PADL, PADR, PADT, PADB, H };
+
+      let grid='',axis='';
+      for(let g=0; g<=100; g+=20){ const yy=Y(g); grid+='<line x1="'+PADL+'" y1="'+yy+'" x2="'+(W-PADR)+'" y2="'+yy+'"/>'; axis+='<text class="rc-ax" x="'+(PADL-8)+'" y="'+(yy+3)+'" text-anchor="end">'+g+'%</text>'; }
+      let xlab=''; B.forEach((b,i)=>{ if(i%Math.ceil(B.length/7)===0||i===B.length-1) xlab+='<text class="rc-ax" x="'+X(i)+'" y="'+(H-PADB+16)+'" text-anchor="middle">'+b.label.replace(/^Week of /,'')+'</text>'; });
+
+      let lines='',dots='';
+      series.forEach(s=>{ if(!retDxOn[s.m.k])return; const col=s.m.c;
+        let solid='',prev=null;
+        s.pts.forEach(p=>{ if(p.v==null){prev=null;return;} const cur={x:X(p.i),y:Y(p.v)};
+          if(prev) solid+='M'+prev.x+','+prev.y+' L'+cur.x+','+cur.y+' ';
+          prev=cur;
+          dots+='<circle cx="'+cur.x+'" cy="'+cur.y+'" r="2.6" fill="'+col+'" stroke="'+col+'" stroke-width="1.4"/>';
+        });
+        lines+='<path class="rc-curve" d="'+solid+'" stroke="'+col+'"/>';
+      });
+      let selLine='';
+      if(retSelected!=null){ const i=B.findIndex(b=>b.key===retSelected); if(i>=0) selLine='<line class="rc-sel" x1="'+X(i)+'" y1="'+PADT+'" x2="'+X(i)+'" y2="'+(H-PADB)+'"/>'; }
+      let hot=''; B.forEach((b,i)=>{ const w=(W-PADL-PADR)/Math.max(1,B.length-1); hot+='<rect x="'+(X(i)-w/2)+'" y="'+PADT+'" width="'+w+'" height="'+(H-PADT-PADB)+'" fill="transparent" data-i="'+i+'"/>'; });
+
+      const legend = '<div class="rc-legend">'+RETENTION_MS.map(m=>'<span class="rc-lg '+(retDxOn[m.k]?"on":"off")+'" onclick="toggleRetDx(\''+m.k+'\')"><span class="sw" style="background:'+m.c+'"></span>'+m.k+'</span>').join('')+'</div>';
+      const cap = retPlan==="annual"
+        ? 'Auto-renew still on by week N, across cohorts'
+        : 'Subscription survival by week N, across cohorts';
+      return '<div class="pf-chart-wrap" id="retChartWrap">'+
+        '<div class="rc-top"><div class="rc-cap">'+cap+'</div>'+legend+'</div>'+
+        '<svg viewBox="0 0 '+W+' '+H+'"><g class="rc-grid">'+grid+'</g>'+axis+xlab+selLine+lines+dots+hot+'</svg>'+
+        '<div class="pf-tip" id="retTip"></div></div>';
+    }
+
+    function retWireHover(bucketsNewestFirst) {
+      const wrap=document.getElementById("retChartWrap"); if(!wrap||!retChartGeom) return;
+      const tip=document.getElementById("retTip"); const {B}=retChartGeom;
+      wrap.querySelectorAll('rect[data-i]').forEach(rect=>{
+        rect.addEventListener('mousemove', (e)=>{
+          const b=B[+rect.dataset.i];
+          const rows = RETENTION_MS.filter(m=>retDxOn[m.k]).map(m=>{
+            const v=b.rx(m.d); if(v==null) return '';
+            return '<div class="t-row"><span class="t-sw" style="background:'+m.c+'"></span>'+m.k+'<span class="t-val">'+Math.round(v)+'% <span style="color:#666;font-size:9.5px">('+b.ret[m.d]+'/'+b.size+')</span></span></div>';
+          }).join('');
+          tip.innerHTML='<div class="t-date">'+b.label+' · '+b.size+' subs</div>'+(rows||'<div class="t-row" style="color:#666">too young — no matured week yet</div>');
+          const wr=wrap.getBoundingClientRect();
+          tip.style.left=(e.clientX-wr.left)+'px'; tip.style.top=(e.clientY-wr.top-8)+'px'; tip.style.opacity=1;
+        });
+        rect.addEventListener('mouseleave', ()=>{ tip.style.opacity=0; });
+      });
+    }
+
+    function renderRetention() {
+      const container = document.getElementById("container");
+      const appBtns = RETENTION_APPS.map(([id,name]) =>
+        '<button class="filter-btn '+(id===retApp?"active":"")+'" onclick="setRetApp(\''+id+'\')">'+name+'</button>'
+      ).join("");
+      const planBtns = RETENTION_PLANS.map(([pk,name]) =>
+        '<button class="filter-btn '+(pk===retPlan?"active":"")+'" onclick="setRetPlan(\''+pk+'\')">'+name+'</button>'
+      ).join("");
+      const granBtns = [["day","Day"],["week","Week"],["month","Month"]].map(([g,name]) =>
+        '<button class="pf-range-btn '+(g===retGran?"active":"")+'" onclick="setRetGran(\''+g+'\')">'+name+'</button>'
+      ).join("");
+      const rangeBtns = [[30,"Last 30 days"],[90,"Last 90 days"],[180,"Last 180 days"],[0,"All time"]].map(([w,name]) =>
+        '<button class="pf-range-btn '+(w===retRange?"active":"")+'" onclick="setRetRange('+w+')">'+name+'</button>'
+      ).join("");
+      const d = retData[retKey()];
+      const synced = d && d.generatedAt ? new Date(d.generatedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
+      const header =
+        '<div class="pf-head">' +
+          '<div><div class="pf-m-label">Retention</div>' +
+            (synced?'<div class="ch-sub">Synced '+synced+'</div>':'')+'</div>' +
+          '<div class="ch-filters">' +
+            '<div class="pf-ranges">'+granBtns+'</div>' +
+            '<div class="pf-ranges">'+rangeBtns+'</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="ch-appbar">'+appBtns+'</div>' +
+        '<div class="ch-appbar" style="margin-top:8px">'+planBtns+'</div>';
+
+      if (!d && retInflight[retKey()]) { container.innerHTML = header + '<div class="loading">Loading retention…</div>'; return; }
+      if (retError && !d) { container.innerHTML = header + '<div class="empty-state"><h2>Couldn’t load retention</h2><p>'+retError+'</p></div>'; return; }
+      if (!d) { container.innerHTML = header + '<div class="loading">Loading retention…</div>'; return; }
+
+      let rrows = (d.rows||[]);
+      if (retRange > 0) rrows = rrows.filter(r => r.ageDays <= retRange);
+      const buckets = retAggregate(rrows, retGran);
+
+      // totals across the selected range (for the summary tiles)
+      let totSubs=0, totRecovered=0, totBilling=0, totUnsub=0, totExpired=0;
+      rrows.forEach(r => { totSubs+=r.size||0; totRecovered+=r.recovered||0; totBilling+=r.billing_now||0; totUnsub+=r.unsub||0; totExpired+=r.expired||0; });
+
+      // tiles adapt to plan: weekly cares about recovered/billing; annual about cancel-intent.
+      const tile = (label,val,color) =>
+        '<div class="pf-metric" style="background:#161616;border:1px solid #232323;border-radius:12px;padding:14px 16px">' +
+          '<div class="pf-m-label">'+label+'</div><div class="pf-m-value" style="font-size:26px'+(color?';color:'+color:'')+'">'+val+'</div></div>';
+      let tilesInner = tile("Subs ("+(retRange===0?"all time":"last "+retRange+"d")+")", totSubs.toLocaleString("en-US"));
+      if (retPlan === "annual") {
+        tilesInner += tile("Voluntary unsubs", totUnsub.toLocaleString("en-US"), totUnsub>0?"#fb923c":"");
+        tilesInner += tile("Still auto-renew on", (totSubs-totUnsub).toLocaleString("en-US"), "#4ade80");
+      } else {
+        tilesInner += tile("Recovered (weekly)", totRecovered.toLocaleString("en-US"), totRecovered>0?"#4ade80":"");
+        tilesInner += tile("In billing issue", totBilling.toLocaleString("en-US"), totBilling>0?"#f87171":"");
+        tilesInner += tile("Voluntary unsubs", totUnsub.toLocaleString("en-US"), totUnsub>0?"#fb923c":"");
+      }
+      const nTiles = retPlan==="annual" ? 3 : 4;
+      const tiles = '<div class="pf-metrics" style="display:grid;grid-template-columns:repeat('+nTiles+',1fr);gap:12px;margin:14px 0">'+tilesInner+'</div>';
+
+      const chart = retChart(buckets);
+
+      // per-cohort table: size · current survival · recovered · in-billing · voluntary unsub · expired
+      const periodCol = retGran === "month" ? "Month" : retGran === "week" ? "Week" : "Install day";
+      const isAnnual = retPlan === "annual";
+      const rowsHtml = buckets.map(b => {
+        const sel = b.key===retSelected;
+        const curCell = b.cur==null
+          ? '<td class="pf-t-num r dim">—</td>'
+          : '<td class="pf-t-num r" style="color:'+retColor(b.cur)+';font-weight:600">'+Math.round(b.cur)+'%<div class="pf-band" style="font-weight:400">'+(b.curK||'')+'</div></td>';
+        const numTd = (v,strong) => v>0
+          ? '<td class="pf-t-num r"'+(strong?' style="font-weight:600"':'')+'>'+v+'</td>'
+          : '<td class="pf-t-num r dim">0</td>';
+        let tr = '<tr class="rc-cohort'+(sel?' sel':'')+'" onclick="selectRetCohort(\''+b.key+'\')">'+
+          '<td class="pf-t-app"><span class="rc-chev">›</span> '+b.label+'</td>'+
+          '<td class="pf-t-num r">'+b.size+'</td>'+
+          curCell +
+          (isAnnual
+            ? numTd(b.unsub,true) + numTd(b.expired)
+            : numTd(b.recovered) + numTd(b.billing_now) + numTd(b.unsub,true) + numTd(b.expired));
+        tr += '</tr>';
+        if (sel) tr += '<tr class="rc-detail"><td colspan="'+(isAnnual?4:6)+'">'+retDetailCard(b)+'</td></tr>';
+        return tr;
+      }).join("");
+      const headCols = isAnnual
+        ? '<th class="r">Auto-renew off</th><th class="r">Expired</th>'
+        : '<th class="r">Recovered</th><th class="r">In billing issue</th><th class="r">Voluntary unsub</th><th class="r">Expired</th>';
+      const foot = isAnnual
+        ? 'Annual cohorts aren’t 1-yr matured, so lines show <b>% auto-renew still on</b> at week N (UNSUBSCRIBE = cancel intent). Install-day cohorts, '+(d.tz||"account")+' time. Click a row for detail.'
+        : 'Weekly <b>survival</b>: retained = still paying at week N. A billing issue churns immediately; a later paid renewal recovers it (counted in <i>Recovered</i>). Install-day cohorts, '+(d.tz||"account")+' time. Click a row for detail.';
+      const table = '<div class="pf-apps"><table class="pf-table"><thead><tr>' +
+        '<th>'+periodCol+'</th><th class="r">Subs</th><th class="r">Survival<div class="pf-band" style="font-weight:400">deepest wk</div></th>'+headCols+
+        '</tr></thead><tbody>'+rowsHtml+'</tbody></table>' +
+        '<div class="ch-foot">'+foot+'</div></div>';
+
+      container.innerHTML = header + tiles + chart + table;
+      retWireHover(buckets);
+    }
+
+    // Expanded per-cohort card: the full survival curve as W1..W12 chips + the breakdown counts.
+    function retDetailCard(b) {
+      const isAnnual = retPlan === "annual";
+      const chips = RETENTION_MS.map(m => {
+        const v = b.rx(m.d);
+        if (v==null) return '<div class="rc-dx proj"><span class="lbl">'+m.k+'</span>—</div>';
+        return '<div class="rc-dx"><span class="lbl">'+m.k+'</span>'+Math.round(v)+'%</div>';
+      }).join('');
+      const pct = (n) => b.size>0 ? Math.round(n/b.size*100) : 0;
+      const breakdown = isAnnual
+        ? '<div class="rc-drow"><span class="k">Auto-renew off (cancel intent)</span><b>'+b.unsub+' <span class="dim" style="font-weight:400">('+pct(b.unsub)+'%)</span></b></div>'+
+          '<div class="rc-drow"><span class="k">Expired</span><b>'+b.expired+'</b></div>'
+        : '<div class="rc-drow"><span class="k">Recovered (billing came back)</span><b>'+b.recovered+' <span class="dim" style="font-weight:400">('+pct(b.recovered)+'%)</span></b></div>'+
+          '<div class="rc-drow"><span class="k">In billing issue now</span><b>'+b.billing_now+' <span class="dim" style="font-weight:400">('+pct(b.billing_now)+'%)</span></b></div>'+
+          '<div class="rc-drow"><span class="k">Voluntary unsub</span><b>'+b.unsub+' <span class="dim" style="font-weight:400">('+pct(b.unsub)+'%)</span></b></div>'+
+          '<div class="rc-drow"><span class="k">Expired</span><b>'+b.expired+'</b></div>';
+      return '<div class="rc-card"><div class="rc-dgrid">'+
+        '<div class="rc-dblock"><h4>Survival curve</h4><div class="rc-dxrow">'+chips+'</div>'+
+          '<div class="rc-note">'+(isAnnual?'% auto-renew still on at each week since start.':'% still paying at each week since start (recoveries counted back in). — = cohort too young to have reached that week.')+'</div>'+
+        '</div>'+
+        '<div class="rc-dblock"><h4>Cohort breakdown ('+b.size+' subs)</h4>'+breakdown+'</div>'+
+      '</div></div>';
     }
 
     // ================= projection model (feeds the merged ROAS tab) =================
