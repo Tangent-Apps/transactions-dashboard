@@ -24,13 +24,20 @@
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
     /* App filter chips — horizontal scroll with fade */
-    .filters-wrap { flex: 1; min-width: 0; position: relative; }
-    .filters { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px 24px 2px 2px; }
-    .filters::-webkit-scrollbar { display: none; }
-    .filters-wrap::after {
-      content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 32px;
-      background: linear-gradient(to right, transparent, #141414); pointer-events: none;
+    .filters-wrap { flex: 0 0 auto; min-width: 0; position: relative; }
+    .filters { display: flex; gap: 6px; }
+    /* App filter dropdown (Activity view) — compact, replaces the pill row */
+    .app-select {
+      appearance: none; -webkit-appearance: none;
+      background: #1c1c1c url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>") no-repeat right 10px center;
+      color: #eee; font-size: 12px; font-weight: 500; font-family: inherit;
+      border: 1px solid #2a2a2a; border-radius: 8px;
+      padding: 6px 28px 6px 12px; cursor: pointer; max-width: 200px;
+      transition: border-color 0.15s;
     }
+    .app-select:hover { border-color: #444; }
+    .app-select:focus { outline: none; border-color: #666; }
+    .app-select option { background: #1c1c1c; color: #eee; }
     .filter-btn { padding: 5px 12px; border-radius: 16px; border: 1px solid #2a2a2a; background: transparent; color: #888; font-size: 12px; cursor: pointer; transition: all 0.15s; white-space: nowrap; flex-shrink: 0; }
     .filter-btn:hover { border-color: #444; color: #ccc; }
     .filter-btn.active { background: #fff; color: #000; border-color: #fff; font-weight: 500; }
@@ -257,7 +264,7 @@
   <div class="toolbar">
     <span class="brand"><span class="live-dot"></span> Transactions</span>
     <div class="toolbar-mid" id="activityControls">
-      <div class="filters-wrap"><div class="filters" id="filters"><button class="filter-btn active" data-app="all">All</button></div></div>
+      <div class="filters-wrap"><div class="filters" id="filters"><select class="app-select" aria-label="Filter by app"><option value="all">All apps</option></select></div></div>
       <div class="view-toggle">
         <button class="toggle-btn live-active" id="toggleLive" onclick="setActivityMode('live')">Live</button>
         <button class="toggle-btn" id="toggleHistory" onclick="setActivityMode('history')">History</button>
@@ -2307,11 +2314,15 @@
         if (ra !== rb) return ra - rb;
         return a.localeCompare(b);
       });
-      filtersEl.innerHTML = '<button class="filter-btn ' + (currentApp === "all" ? "active" : "") + '" data-app="all">All</button>' +
-        apps.map(a => '<button class="filter-btn ' + (currentApp === a ? "active" : "") + '" data-app="' + a + '">' + a + '</button>').join("");
-      filtersEl.querySelectorAll(".filter-btn").forEach(btn => {
-        btn.addEventListener("click", () => { currentApp = btn.dataset.app; updateFilters(); renderAll(); fetchSwStats(); });
-      });
+      // Guard invalid selection (e.g. an app that dropped out of the window)
+      if (currentApp !== "all" && !knownApps.has(currentApp)) currentApp = "all";
+      const opts = ['<option value="all"' + (currentApp === "all" ? " selected" : "") + '>All apps</option>']
+        .concat(apps.map(a =>
+          '<option value="' + a.replace(/"/g, "&quot;") + '"' + (currentApp === a ? " selected" : "") + '>' + a + '</option>'
+        )).join("");
+      filtersEl.innerHTML = '<select class="app-select" id="appSelect" aria-label="Filter by app">' + opts + '</select>';
+      const sel = document.getElementById("appSelect");
+      sel.addEventListener("change", () => { currentApp = sel.value; updateFilters(); renderAll(); fetchSwStats(); });
     }
 
     const VISIBLE_TYPES_ARR = Array.from(VISIBLE_TYPES);
